@@ -179,8 +179,19 @@ function executeApprovedRows() {
     }
   }
 
+  const ui = SpreadsheetApp.getUi();
   if (targetIndices.length === 0) {
-    SpreadsheetApp.getUi().alert("「確認済」にチェックが入っている対象行がありません。");
+    ui.alert("「確認済」にチェックが入っている対象行がありません。");
+    return;
+  }
+
+  // ★実行前の確認アラート表示
+  const confirmResponse = ui.alert(
+    "Slack投稿・転記の確認",
+    "医師への送信なども済みですか？\n投稿後、このスレッドは削除されます。",
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (confirmResponse !== ui.Button.OK) {
     return;
   }
 
