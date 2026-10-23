@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <style>
+    :root {
+      --gb-body: #d8d4c8;
+      --gb-border: #4a4842;
+      --gb-screen-bg: #e8f0d8;
+      --gb-screen-dark: #1e2d18;
+      --gb-screen-mid: #4a6b3b;
+      --gb-screen-light: #c8dcaf;
+      --gb-magenta: #9b2256;
+      --gb-blue: #204987;
+      --gb-gold: #c97a10;
+    }
+    * { box-sizing: border-box; font-family: "Hiragino Kaku Gothic ProN", "Meiryo", monospace; }
+    body {
+      margin: 0; padding: 10px;
+      background: var(--gb-body);
+      color: var(--gb-screen-dark);
+      font-size: 13px;
+    }
+    .gb-shell {
+      border: 4px solid var(--gb-border);
+      border-radius: 12px 12px 28px 12px;
+      background: #e4e0d4;
+      padding: 10px;
+      box-shadow: inset -3px -3px 0px #b5b0a2, 4px 4px 0px rgba(0,0,0,0.2);
+      height: 785px;
+      display: flex;
+      flex-direction: column;
+    }
+    .gb-header {
+      display: flex; justify-content: space-between; align-items: center;
+      background: var(--gb-screen-dark); color: #e8f0d8;
+      padding: 6px 14px; border-radius: 6px; margin-bottom: 8px;
+      font-weight: bold; letter-spacing: 1px;
+    }
+    .gb-badge {
+      background: var(--gb-magenta); color: #fff;
+      padding: 2px 8px; border-radius: 10px; font-size: 11px;
+    }
+    .gb-main {
+      display: grid;
+      grid-template-columns: 270px 1fr 370px;
+      gap: 10px;
+      flex: 1;
+      min-height: 0;
+    }
+    .gb-panel {
+      background: var(--gb-screen-bg);
+      border: 3px solid var(--gb-border);
+      border-radius: 8px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+    .panel-title {
+      font-size: 13px; font-weight: bold;
+      color: #fff; background: var(--gb-screen-mid);
+      padding: 5px 8px; border-radius: 4px; margin-bottom: 8px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .item-card {
+      background: #f7fbf0;
+      border: 2px solid #8ba37b;
+      border-radius: 6px;
+      padding: 8px; margin-bottom: 7px;
+      cursor: pointer; transition: 0.1s;
+    }
+    .item-card:hover { background: #dcebc7; }
+    .item-card.active {
+      border: 3px solid var(--gb-magenta);
+      background: #fff5f8;
+      box-shadow: 2px 2px 0px var(--gb-magenta);
+    }
+    .item-date { font-weight: bold; font-size: 13px; color: var(--gb-blue); }
+    .item-clinic { font-weight: bold; font-size: 14px; margin: 3px 0 0 0; }
+    .item-doc { font-size: 12px; color: #333; margin-top: 3px; font-weight: bold; }
+    .evidence-box {
+      background: #fffde7; border: 2px dashed #fbc02d;
+      padding: 7px; border-radius: 6px; margin-bottom: 8px; font-size: 12px;
+    }
+    .form-row { margin-bottom: 8px; }
+    .form-label { font-weight: bold; font-size: 12px; margin-bottom: 3px; display: block; color: var(--gb-screen-dark); }
+    input[type="text"], input[type="number"], select, textarea {
+      width: 100%; padding: 5px 8px;
+      border: 2px solid var(--gb-border); border-radius: 5px;
+      background: #fff; font-size: 13px; font-weight: bold;
+    }
+    .btn-group { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 3px; }
+    .gb-btn {
+      padding: 5px 10px;
+      border: 2px solid var(--gb-border);
+      border-radius: 6px;
+      background: #fff;
+      font-weight: bold; font-size: 12px;
+      cursor: pointer;
+      box-shadow: 0 2px 0 var(--gb-border);
+    }
+    .gb-btn:active { transform: translateY(2px); box-shadow: none; }
+    .gb-btn.selected {
+      background: var(--gb-blue); color: #fff; border-color: #102a52;
+    }
+    .gb-btn.selected-magenta {
+      background: var(--gb-magenta); color: #fff; border-color: #5e1132;
+    }
+    .doc-candidates {
+      max-height: 110px; overflow-y: auto;
+      border: 2px solid #8ba37b; border-radius: 5px;
+      background: #fff; margin-top: 4px;
+    }
+    .doc-cand-item {
+      padding: 5px 8px; border-bottom: 1px solid #e0e0e0;
+      cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+    }
+    .doc-cand-item:hover { background: #e8f5e9; }
+    .doc-shift-tag {
+      background: #e3f2fd; color: #0d47a1; padding: 1px 6px; border-radius: 4px; font-size: 11px;
+    }
+    .wage-box {
+      background: #dcebc7;
+      border: 2px solid #4a6b3b;
+      border-radius: 6px;
+      padding: 7px 8px;
+    }
+    .hourly-flex {
+      display: flex; gap: 8px; margin-top: 4px;
+    }
+    .hourly-flex > div {
+      flex: 1;
+    }
+    .wage-grid {
+      display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 6px;
+    }
+    .action-bar {
+      display: flex; gap: 8px; margin-top: 8px;
+    }
+    .btn-ok {
+      flex: 2; background: var(--gb-magenta); color: #fff;
+      font-size: 15px; padding: 10px; border: 3px solid #3a0b1e;
+      border-radius: 8px; cursor: pointer; font-weight: bold;
+      box-shadow: 0 4px 0 #3a0b1e;
+    }
+    .btn-ok:hover { filter: brightness(1.1); }
+    .btn-discard {
+      flex: 1; background: #78909c; color: #fff;
+      font-size: 12px; padding: 10px; border: 2px solid #37474f;
+      border-radius: 8px; cursor: pointer; font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div class="gb-shell">
+    <div class="gb-header">
+      <div>🕹️ SHUSEI-KUN SYSTEM [確認リスト補正パネル]</div>
+      <div id="headerStatus" class="gb-badge">データ読込中...</div>
+    </div>
+
+    <div class="gb-main">
+      <!-- ① 左画面：確認リスト一覧 -->
+      <div class="gb-panel">
+        <div class="panel-title">
+          <span>📋 1. 確認リスト一覧</span>
+          <span id="remainCount">0件</span>
+        </div>
+        <div id="leftItemList">読み込み中...</div>
+      </div>
+
+      <!-- ② 中央画面：条件・医師マスタ・時給日給設定 -->
+      <div class="gb-panel">
+        <div class="panel-title">
+          <span>🔍 2. 拠点・医師・時給設定</span>
+          <span id="selectedDateBadge">-</span>
+        </div>
+
+        <div id="evidenceBox" class="evidence-box">左のリストから項目を選択してください。</div>
+
+        <!-- エリア（関東・関西）トグル ＆ 対象拠点 ＆ 診療科 -->
+        <div style="display:grid; grid-template-columns: 115px 1fr 110px; gap:6px; align-items:end;" class="form-row">
+          <div>
+            <label class="form-label">🗾 エリア</label>
+            <div class="btn-group">
+              <button type="button" id="areaKantoBtn" class="gb-btn selected" onclick="setAreaToggle('関東')">関東</button>
+              <button type="button" id="areaKansaiBtn" class="gb-btn" onclick="setAreaToggle('関西')">関西</button>
+            </div>
+          </div>
+          <div>
+            <label class="form-label">🏥 対象拠点名</label>
+            <select id="clinicSelect" onchange="onClinicOrDeptChange()"></select>
+          </div>
+          <div>
+            <label class="form-label">🩺 診療科</label>
+            <div class="btn-group">
+              <button type="button" id="deptPedBtn" class="gb-btn selected" onclick="setDept('小児科')">小児科</button>
+              <button type="button" id="deptIntBtn" class="gb-btn" style="display:none;" onclick="setDept('内科')">内科</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">⏰ 不在時間帯（基本ボタン または 直接入力）</label>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <div class="btn-group" style="flex:1.6;">
+              <button type="button" class="gb-btn" onclick="setPresetTime('am')">午前</button>
+              <button type="button" class="gb-btn" onclick="setPresetTime('pm')">午後</button>
+              <button type="button" class="gb-btn" onclick="setPresetTime('night')">夜間</button>
+              <button type="button" class="gb-btn" onclick="setPresetTime('pm_night')">午後・夜間</button>
+            </div>
+            <input type="text" id="absenceTimeInput" style="flex:1;" placeholder="15:00-18:00" oninput="onTimeRangeChanged()">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">🎯 アプローチ種別</label>
+          <div class="btn-group">
+            <button type="button" id="ap_early" class="gb-btn" onclick="setApproach('早出相談')">⏪ 早出</button>
+            <button type="button" id="ap_move" class="gb-btn selected-magenta" onclick="setApproach('勤務地変更相談')">🚚 勤務地移動</button>
+            <button type="button" id="ap_add" class="gb-btn" onclick="setApproach('個別アプローチ')">➕ 追加勤務(個別)</button>
+            <button type="button" id="ap_ext" class="gb-btn" onclick="setApproach('延長相談')">⏩ 延長</button>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">
+            👨‍⚕️ 対象医師名（<span id="areaDocLabel" style="color:var(--gb-blue);">関東</span>・<span id="masterDeptLabel" style="color:var(--gb-magenta);">小児科</span>の医師候補から名字で検索）
+          </label>
+          <div style="display:flex; gap:6px;">
+            <input type="text" id="doctorInput" placeholder="名字を入力（例：伊藤）" oninput="filterDoctorCandidates()">
+            <button type="button" class="gb-btn" onclick="clearDoctorInput()">クリア</button>
+          </div>
+          <div id="docCandidatesBox" class="doc-candidates"></div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:6px;" class="form-row">
+          <div>
+            <label class="form-label">移動元拠点</label>
+            <input type="text" id="fromClinicInput" placeholder="自動または手入力" oninput="recalcAll()">
+          </div>
+          <div>
+            <label class="form-label">現在シフト時間</label>
+            <input type="text" id="currentTimeInput" placeholder="09:00-13:00" oninput="recalcFromHourlyInputs()">
+          </div>
+          <div>
+            <label class="form-label">相談シフト時間</label>
+            <input type="text" id="consultTimeInput" placeholder="15:00-18:00" oninput="onTimeRangeChanged()">
+          </div>
+        </div>
+
+        <div class="form-row wage-box">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span id="wageRuleBadge" style="font-weight:bold; font-size:12px; color:#1e2d18;">💰 時給設定</span>
+            <label style="font-weight:bold; font-size:12px; cursor:pointer; color:var(--gb-magenta);">
+              <input type="checkbox" id="specialWageCheck" onchange="recalcFromHourlyInputs()"> ★特別時給（+2,000円/h）
+            </label>
+          </div>
+
+          <div class="hourly-flex">
+            <div id="wrapRateAm">
+              <label class="form-label">午前時給(円)</label>
+              <input type="number" id="rateAmInput" value="0" step="500" oninput="recalcFromHourlyInputs()">
+            </div>
+            <div id="wrapRatePm">
+              <label class="form-label">午後時給(円)</label>
+              <input type="number" id="ratePmInput" value="0" step="500" oninput="recalcFromHourlyInputs()">
+            </div>
+            <div id="wrapRateNight">
+              <label class="form-label">夜間時給(円)</label>
+              <input type="number" id="rateNightInput" value="0" step="500" oninput="recalcFromHourlyInputs()">
+            </div>
+          </div>
+
+          <div class="wage-grid">
+            <div>
+              <label class="form-label">現在日給(円)</label>
+              <input type="number" id="currentDailyWageInput" value="0" oninput="rebuildDraftPreview()">
+            </div>
+            <div>
+              <label class="form-label">相談日給(円)</label>
+              <input type="number" id="consultDailyWageInput" value="0" oninput="rebuildDraftPreview()">
+            </div>
+            <div>
+              <label class="form-label">依頼手当(円)</label>
+              <input type="number" id="allowanceInput" value="10000" oninput="rebuildDraftPreview()">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ③ 右画面：文案レビュー＆移動実行 -->
+      <div class="gb-panel">
+        <div class="panel-title">
+          <span>✉️ 3. 文案レビュー＆移動</span>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">👤 担当者</label>
+          <select id="staffSelect" onchange="rebuildDraftPreview()"></select>
+        </div>
+
+        <div class="form-row" style="flex:1; display:flex; flex-direction:column;">
+          <label class="form-label">📝 送信文案プレビュー（直接編集も可能です）</label>
+          <textarea id="draftPreview" style="flex:1; min-height:360px; font-weight:normal; line-height:1.45;"></textarea>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">📌 『アプローチシート』作業メモ転記内容</label>
+          <input type="text" id="memoPreview" readonly style="background:#eef5e6;">
+        </div>
+
+        <div class="action-bar">
+          <button type="button" class="btn-ok" id="commitBtn" onclick="commitCurrentItem()">
+            ⭕ OK（文案・Slackレビューへ移す）
+          </button>
+          <button type="button" class="btn-discard" onclick="discardCurrentItem()">
+            🗑️ 確認リストから消す
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <?!= includeHtml_('08b_Shuseikun_JS_View'); ?>
+  <?!= includeHtml_('08c_Shuseikun_JS_Calc'); ?>
+</body>
+</html>

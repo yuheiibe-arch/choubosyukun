@@ -1,0 +1,447 @@
+<script>
+  var STATE = {
+    confirmItems: [],
+    clinics: [],
+    clinicAreaMap: {},
+    clinicOpenDateMap: {},
+    staffList: [],
+    holidays: new Set(),
+    d6Data: [],
+    d3Data: [],
+    doctorMaster: [],
+    wageTables: {},
+    selectedIdx: -1,
+    area: "関東",
+    dept: "小児科",
+    approachType: "勤務地変更相談"
+  };
+
+  function stripClinicPrefix_(name) {
+    return String(name || "")
+      .replace(/^[0-9０-９]+[\.．、\s ]*/, "")
+      .replace(/[\(（].*?[\)）]/g, "")
+      .trim();
+  }
+
+  function normalizeKanaKeJS_(name) {
+    return stripClinicPrefix_(name).replace(/ヶ/g, "ケ").replace(/が丘/g, "ヶ丘");
+  }
+
+  function normalizeApproachTypeJS_(rawType, evidenceText) {
+    var s = String(rawType || "").trim();
+    var ev = String(evidenceText || "").trim();
+
+    if (s.indexOf("移動") !== -1 || s.indexOf("変更") !== -1) return "勤務地変更相談";
+    if (s.indexOf("個別") !== -1 || s.indexOf("追加") !== -1) return "個別アプローチ";
+    if (s.indexOf("早出") !== -1 || s.indexOf("前倒") !== -1) return "早出相談";
+    if (s.indexOf("延長") !== -1) return "延長相談";
+
+    if (ev.indexOf("移動") !== -1 || ev.indexOf("から") !== -1) return "勤務地変更相談";
+    if (ev.indexOf("個別") !== -1 || ev.indexOf("別アプローチ") !== -1 || ev.indexOf("追加") !== -1) return "個別アプローチ";
+    if (ev.indexOf("早出") !== -1 || ev.indexOf("前倒") !== -1) return "早出相談";
+    if (ev.indexOf("延長") !== -1) return "延長相談";
+
+    return "勤務地変更相談";
+  }
+
+  /**
+   * 『拠点名』シート（A列：拠点名、H列：エリア）から動的に読み込んだマップのみでエリアを判定する
+   */
+  function getClinicAreaJS_(clinicName) {
+    var clean = stripClinicPrefix_(clinicName);
+    if (!clean) return "";
+    var map = STATE.clinicAreaMap || {};
+    var norm = normalizeKanaKeJS_(clean);
+    if (map[clean]) return map[clean];
+    if (map[norm]) return map[norm];
+
+    var keys = Object.keys(map);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var normK = normalizeKanaKeJS_(k);
+      if (normK && (norm.indexOf(normK) === 0 || normK.indexOf(norm) === 0)) {
+        return map[k];
+      }
+    }
+    return "";
+  }
+
+  /**
+   * 対象日（dateStr）がその拠点の開院日以降かを判定する（開院前は false で候補から除外）
+   */
+  function isClinicOpenOnDateJS_(clinicName, dateStr) {
+    var clean = stripClinicPrefix_(clinicName);
+    if (!clean || !dateStr) return true;
+    var map = STATE.clinicOpenDateMap || {};
+    var norm = normalizeKanaKeJS_(clean);
+    var openYmd = map[clean] || map[norm] || "";
+
+    if (!openYmd) {
+      var keys = Object.keys(map);
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        var normK = normalizeKanaKeJS_(k);
+        if (normK && (norm.indexOf(normK) === 0 || normK.indexOf(norm) === 0)) {
+          openYmd = map[k];
+          break;
+        }
+      }
+    }
+
+    if (openYmd && dateStr < openYmd) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * 時給シートのデータから、その拠点に「内科」が存在するかを動的に判定する
+   */
+  function clinicHasInternalMedicineJS_(clinicName) {
+    var clean = stripClinicPrefix_(clinicName);
+    if (!clean) return false;
+    var norm = normalizeKanaKeJS_(clean);
+    var tables = STATE.wageTables || {};
+    var sheetNames = Object.keys(tables);
+    for (var i = 0; i < sheetNames.length; i++) {
+      var tbl = tables[sheetNames[i]] || {};
+      if (tbl[clean + "|内科"] || tbl[norm + "|内科"] || tbl[clean + "(内科)"] || tbl[clean + "（内科）"]) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  window.onload = function() {
+    google.script.run
+      .withSuccessHandler(onInitDataLoaded)
+      .withFailureHandler(function(err) {
+        document.getElementById("headerStatus").innerText = "エラー: " + err.message;
+      })
+      .getShuseikunInitData();
+  };
+
+  function onInitDataLoaded(data) {
+    STATE.confirmItems = data.confirmItems || [];
+    STATE.clinics = (data.clinics || []).map(stripClinicPrefix_).filter(function(v, i, a) { return v && a.indexOf(v) === i; });
+    STATE.clinicAreaMap = data.clinicAreaMap || {};
+    STATE.clinicOpenDateMap = data.clinicOpenDateMap || {};
+    STATE.staffList = data.staffList || [];
+    STATE.holidays = new Set(data.holidays || []);
+    STATE.d6Data = data.d6Data || [];
+    STATE.d3Data = data.d3Data || [];
+    STATE.doctorMaster = data.doctorMaster || [];
+    STATE.wageTables = data.wageTables || {};
+
+    var stSel = document.getElementById("staffSelect");
+    stSel.innerHTML = '<option value="">（未選択）</option>';
+    STATE.staffList.forEach(function(st) {
+      var opt = document.createElement("option");
+      opt.value = st;
+      opt.textContent = st;
+      stSel.appendChild(opt);
+    });
+
+    renderLeftList();
+    if (STATE.confirmItems.length > 0) {
+      selectConfirmItem(0);
+      document.getElementById("headerStatus").innerText = "残り " + STATE.confirmItems.length + "件";
+    } else {
+      document.getElementById("headerStatus").innerText = "確認リストは0件です";
+      document.getElementById("leftItemList").innerHTML = "<div style='padding:12px;font-weight:bold;'>🎉 現在、確認リストに残っている項目はありません。</div>";
+    }
+  }
+
+  function renderLeftList() {
+    var box = document.getElementById("leftItemList");
+    document.getElementById("remainCount").innerText = STATE.confirmItems.length + "件";
+    if (STATE.confirmItems.length === 0) {
+      box.innerHTML = "<div style='padding:10px;'>すべて処理完了しました！</div>";
+      return;
+    }
+    box.innerHTML = "";
+    STATE.confirmItems.forEach(function(item, idx) {
+      var card = document.createElement("div");
+      card.className = "item-card" + (idx === STATE.selectedIdx ? " active" : "");
+      card.onclick = function() { selectConfirmItem(idx); };
+
+      var clinicName = stripClinicPrefix_(item.guessedClinic || item.rawClinicName) || "拠点未確定";
+      var hasInt = clinicHasInternalMedicineJS_(clinicName);
+      var clinicLabel = hasInt ? (clinicName + "（" + item.dept + "）") : clinicName;
+
+      var docHtml = item.extractedDoctor
+        ? '<div class="item-doc">👨‍⚕️ ' + item.extractedDoctor + ' 先生</div>'
+        : '';
+
+      card.innerHTML =
+        '<div class="item-date">📅 ' + (item.dateStr || "日付未定") + ' [' + (item.targetTime || "-") + ']</div>' +
+        '<div class="item-clinic">🏥 ' + clinicLabel + '</div>' +
+        docHtml;
+
+      box.appendChild(card);
+    });
+  }
+
+  function setAreaToggle(area, preferredClinic, skipRecalc) {
+    STATE.area = (area === "関西") ? "関西" : "関東";
+    document.getElementById("areaKantoBtn").className = "gb-btn" + (STATE.area === "関東" ? " selected" : "");
+    document.getElementById("areaKansaiBtn").className = "gb-btn" + (STATE.area === "関西" ? " selected" : "");
+    var areaDocEl = document.getElementById("areaDocLabel");
+    if (areaDocEl) areaDocEl.innerText = STATE.area;
+
+    populateClinicSelectByArea_(preferredClinic);
+    updateDeptButtonsByClinic_();
+    filterDoctorCandidates();
+    if (!skipRecalc) onClinicOrDeptChange();
+  }
+
+  function populateClinicSelectByArea_(preferredClinic) {
+    var item = STATE.confirmItems[STATE.selectedIdx];
+    var dateStr = item ? item.dateStr : "";
+    var cSel = document.getElementById("clinicSelect");
+    cSel.innerHTML = "";
+
+    var d6ClinicsOnDay = STATE.d6Data
+      .filter(function(d) {
+        var bc = stripClinicPrefix_(d.baseClinic);
+        var cArea = getClinicAreaJS_(bc);
+        return d.dateStr === dateStr && (!cArea || cArea === STATE.area) && isClinicOpenOnDateJS_(bc, dateStr);
+      })
+      .map(function(d) { return stripClinicPrefix_(d.baseClinic); });
+
+    var added = new Set();
+    d6ClinicsOnDay.forEach(function(c) {
+      if (!c || added.has(c)) return;
+      added.add(c);
+      var opt = document.createElement("option");
+      opt.value = c;
+      opt.textContent = "★ " + c + "（当日募集枠あり）";
+      cSel.appendChild(opt);
+    });
+
+    STATE.clinics.forEach(function(c) {
+      var cleanC = stripClinicPrefix_(c);
+      if (!cleanC || added.has(cleanC)) return;
+      if (!isClinicOpenOnDateJS_(cleanC, dateStr)) return;
+      var cArea = getClinicAreaJS_(cleanC);
+      if (cArea && cArea !== STATE.area) return;
+      added.add(cleanC);
+      var opt = document.createElement("option");
+      opt.value = cleanC;
+      opt.textContent = cleanC;
+      cSel.appendChild(opt);
+    });
+
+    if (preferredClinic && isClinicOpenOnDateJS_(preferredClinic, dateStr)) {
+      var normPref = normalizeKanaKeJS_(preferredClinic);
+      for (var i = 0; i < cSel.options.length; i++) {
+        var optNorm = normalizeKanaKeJS_(cSel.options[i].value);
+        if (optNorm === normPref || optNorm.indexOf(normPref) === 0 || normPref.indexOf(optNorm) === 0) {
+          cSel.selectedIndex = i;
+          break;
+        }
+      }
+    }
+  }
+
+  function updateDeptButtonsByClinic_() {
+    var clinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
+    var hasInternalMed = clinicHasInternalMedicineJS_(clinic);
+    var intBtn = document.getElementById("deptIntBtn");
+    if (intBtn) {
+      intBtn.style.display = hasInternalMed ? "inline-block" : "none";
+    }
+    if (!hasInternalMed && STATE.dept !== "小児科") {
+      STATE.dept = "小児科";
+      document.getElementById("deptPedBtn").className = "gb-btn selected";
+      if (intBtn) intBtn.className = "gb-btn";
+      document.getElementById("masterDeptLabel").innerText = "小児科";
+    }
+  }
+
+  function selectConfirmItem(idx) {
+    if (idx < 0 || idx >= STATE.confirmItems.length) return;
+    STATE.selectedIdx = idx;
+    renderLeftList();
+
+    var item = STATE.confirmItems[idx];
+    document.getElementById("selectedDateBadge").innerText = item.dateStr || "-";
+    document.getElementById("evidenceBox").innerHTML =
+      "<b>【MTG発言】</b>" + (item.evidence || "（発言抜粋なし）");
+
+    var guessClean = stripClinicPrefix_(item.guessedClinic || item.rawClinicName);
+    if (guessClean && !isClinicOpenOnDateJS_(guessClean, item.dateStr)) {
+      guessClean = "";
+    }
+    var initialArea = getClinicAreaJS_(guessClean) || "関東";
+
+    setDept(item.dept || "小児科", true);
+    setAreaToggle(initialArea, guessClean, true);
+
+    document.getElementById("absenceTimeInput").value = item.targetTime || "15:00-18:00";
+    document.getElementById("doctorInput").value = item.extractedDoctor || "";
+    document.getElementById("fromClinicInput").value = "";
+    document.getElementById("currentTimeInput").value = "";
+    document.getElementById("consultTimeInput").value = item.targetTime || "15:00-18:00";
+    document.getElementById("staffSelect").value = item.staffName || "";
+    document.getElementById("specialWageCheck").checked = (item.evidence || "").indexOf("特別時給") !== -1;
+
+    var resolvedAp = normalizeApproachTypeJS_(item.approachType, item.evidence);
+    setApproach(resolvedAp, true);
+
+    filterDoctorCandidates(true);
+    onClinicOrDeptChange();
+  }
+
+  function setDept(dept, skipRecalc) {
+    var clinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
+    if (!clinicHasInternalMedicineJS_(clinic)) dept = "小児科";
+
+    STATE.dept = dept;
+    document.getElementById("deptPedBtn").className = "gb-btn" + (dept === "小児科" ? " selected" : "");
+    document.getElementById("deptIntBtn").className = "gb-btn" + (dept === "内科" ? " selected" : "");
+    document.getElementById("masterDeptLabel").innerText = dept;
+    filterDoctorCandidates();
+    if (!skipRecalc) onClinicOrDeptChange();
+  }
+
+  function setPresetTime(type) {
+    var clinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
+    var isKita = (clinic === "北葛西");
+    var val = "15:00-18:00";
+    if (type === "am") val = "09:00-13:00";
+    if (type === "pm") val = "15:00-18:00";
+    if (type === "night") val = isKita ? "18:00-20:00" : "18:00-21:00";
+    if (type === "pm_night") val = isKita ? "15:00-20:00" : "15:00-21:00";
+    document.getElementById("absenceTimeInput").value = val;
+    document.getElementById("consultTimeInput").value = val;
+    onTimeRangeChanged();
+  }
+
+  function setApproach(apType, skipRecalc) {
+    STATE.approachType = apType;
+    document.getElementById("ap_early").className = "gb-btn" + (apType === "早出相談" ? " selected-magenta" : "");
+    document.getElementById("ap_move").className  = "gb-btn" + (apType === "勤務地変更相談" ? " selected-magenta" : "");
+    document.getElementById("ap_add").className   = "gb-btn" + (apType === "個別アプローチ" ? " selected-magenta" : "");
+    document.getElementById("ap_ext").className   = "gb-btn" + (apType === "延長相談" ? " selected-magenta" : "");
+
+    document.getElementById("allowanceInput").value = (apType === "勤務地変更相談") ? 10000 : 0;
+    if (!skipRecalc) recalcAll();
+  }
+
+  function clearDoctorInput() {
+    document.getElementById("doctorInput").value = "";
+    document.getElementById("fromClinicInput").value = "";
+    document.getElementById("currentTimeInput").value = "";
+    filterDoctorCandidates();
+    recalcAll();
+  }
+
+  function filterDoctorCandidates(autoPickIfSingle) {
+    var query = (document.getElementById("doctorInput").value || "").trim();
+    var box = document.getElementById("docCandidatesBox");
+    var item = STATE.confirmItems[STATE.selectedIdx];
+    var dateStr = item ? item.dateStr : "";
+
+    var targetClinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
+    var targetArea = getClinicAreaJS_(targetClinic) || STATE.area || "関東";
+
+    var d3OnDateMap = {};
+    var docWorkedInTargetArea = new Set();
+    var docWorkedInOtherArea = new Set();
+
+    STATE.d3Data.forEach(function(s) {
+      var shiftArea = s.area || getClinicAreaJS_(s.clinicName);
+      if (shiftArea === targetArea) {
+        docWorkedInTargetArea.add(s.docName);
+        if (s.dateStr === dateStr && isClinicOpenOnDateJS_(s.clinicName, dateStr)) {
+          d3OnDateMap[s.docName] = s;
+        }
+      } else if (shiftArea) {
+        docWorkedInOtherArea.add(s.docName);
+      }
+    });
+
+    var filtered = STATE.doctorMaster.filter(function(doc) {
+      if (doc.dept !== STATE.dept) return false;
+
+      var docAreas = doc.areas || [];
+      var hasTargetArea = docAreas.indexOf(targetArea) !== -1 || docWorkedInTargetArea.has(doc.name) || Boolean(d3OnDateMap[doc.name]);
+      var hasOtherArea = (docAreas.length > 0 && docAreas.indexOf(targetArea) === -1) || docWorkedInOtherArea.has(doc.name);
+
+      if (targetArea === "関西" && !hasTargetArea) return false;
+      if (targetArea === "関東" && hasOtherArea && !hasTargetArea) return false;
+
+      if (!query) return Boolean(d3OnDateMap[doc.name]);
+      return doc.name.indexOf(query) !== -1 || (doc.kana && doc.kana.indexOf(query) !== -1);
+    });
+
+    filtered.sort(function(a, b) {
+      var aHas = d3OnDateMap[a.name] ? 1 : 0;
+      var bHas = d3OnDateMap[b.name] ? 1 : 0;
+      if (bHas !== aHas) return bHas - aHas;
+      return a.name.localeCompare(b.name);
+    });
+
+    var topList = filtered.slice(0, 25);
+    box.innerHTML = "";
+
+    if (topList.length === 0) {
+      box.innerHTML = "<div style='padding:6px;color:#777;'>一致する" + targetArea + "エリア（" + STATE.dept + "）の医師候補がありません</div>";
+      return;
+    }
+
+    topList.forEach(function(doc) {
+      var shift = d3OnDateMap[doc.name];
+      var row = document.createElement("div");
+      row.className = "doc-cand-item";
+      var cleanShiftClinic = shift ? stripClinicPrefix_(shift.clinicName) : "";
+      var shiftHtml = shift
+        ? '<span class="doc-shift-tag">当日:' + cleanShiftClinic + ' ' + shift.startTime + '-' + shift.endTime + '</span>'
+        : '<span style="font-size:11px;color:#888;">[' + targetArea + '・' + doc.dept + ']</span>';
+      row.innerHTML = '<span><b>' + doc.name + '</b> 先生</span>' + shiftHtml;
+      row.onclick = function() {
+        applySelectedDoctor(doc.name, shift, false);
+      };
+      box.appendChild(row);
+    });
+
+    if (autoPickIfSingle && query) {
+      var onDayMatches = topList.filter(function(d) { return Boolean(d3OnDateMap[d.name]); });
+      if (onDayMatches.length === 1) {
+        applySelectedDoctor(onDayMatches[0].name, d3OnDateMap[onDayMatches[0].name], true);
+      }
+    }
+  }
+
+  function applySelectedDoctor(docName, shiftObj, isAutoInit) {
+    document.getElementById("doctorInput").value = docName;
+    var absTime = document.getElementById("absenceTimeInput").value || "15:00-18:00";
+    var absParts = absTime.split("-");
+    var targetClinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
+
+    if (shiftObj) {
+      var shiftClinic = stripClinicPrefix_(shiftObj.clinicName || "");
+      document.getElementById("fromClinicInput").value = shiftClinic;
+      document.getElementById("currentTimeInput").value = shiftObj.startTime + "-" + shiftObj.endTime;
+
+      // 手動クリック時のみ、当日シフト拠点と対象拠点が異なれば「勤務地変更相談」へ自動調整（初期表示時は確認リストの指定種別を優先）
+      if (!isAutoInit && shiftClinic && targetClinic && normalizeKanaKeJS_(shiftClinic) !== normalizeKanaKeJS_(targetClinic)) {
+        if (STATE.approachType === "延長相談" || STATE.approachType === "早出相談") {
+          setApproach("勤務地変更相談", true);
+        }
+      }
+
+      if (STATE.approachType === "延長相談" && absParts[1]) {
+        document.getElementById("consultTimeInput").value = shiftObj.startTime + "-" + absParts[1];
+      } else if (STATE.approachType === "早出相談" && absParts[0]) {
+        document.getElementById("consultTimeInput").value = absParts[0] + "-" + shiftObj.endTime;
+      } else {
+        document.getElementById("consultTimeInput").value = shiftObj.startTime + "-" + shiftObj.endTime;
+      }
+    } else {
+      document.getElementById("consultTimeInput").value = absTime;
+    }
+    recalcAll();
+  }
+</script>
