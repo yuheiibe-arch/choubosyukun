@@ -100,7 +100,7 @@ function loadD3PastedShifts_(sheet) {
 
   const groupedMap = new Map();
   for (const s of rawList) {
-    const key = `${s.dateStr}\vert{}${s.docName}|${s.clinicName}\vert{}${s.dept}`;
+    const key = [s.dateStr, s.docName, s.clinicName, s.dept].join("|");
     if (!groupedMap.has(key)) {
       groupedMap.set(key, { ...s });
     } else {
@@ -165,8 +165,12 @@ function resolveAmbiguousClinic_(clinicName, rawClinicName, dateStr, targetTime,
 function matchD6RowsSmart_(d6Data, dateStr, clinicName, dept, targetTime, isKitaOrKame) {
   if (!clinicName || clinicName === "要確認") return { mergedRow: null };
 
+  const normKey = s => String(s || "").replace(/[ヶケが]/g, "ケ").trim();
+  const targetNorm = normKey(clinicName);
+
   let matches = d6Data.filter(d => {
-    if (d.dateStr !== dateStr || d.baseClinic !== clinicName) return false;
+    if (d.dateStr !== dateStr) return false;
+    if (d.baseClinic !== clinicName && normKey(d.baseClinic) !== targetNorm) return false;
     if (isKitaOrKame && dept !== "要確認" && dept !== "ワクチン専任" && d.dept !== dept) return false;
     if (!targetTime) return true;
     return d.absenceTime === targetTime || isTimeOverlapping_(d.absenceTime, targetTime);

@@ -35,11 +35,11 @@ var SHEET_NAMES = {
   D7_LOG:         "取込・投稿ログ"
 };
 
-var CAO_HOLIDAY_CSV_URL = "[https://www8.cao.go.jp/chosei/shukujitsu/syukujitsu.csv](https://www8.cao.go.jp/chosei/shukujitsu/syukujitsu.csv)";
+var CAO_HOLIDAY_CSV_URL = "https://" + "www8.cao.go.jp/chosei/shukujitsu/syukujitsu.csv";
 var SLACK_CHANNEL_ID = "C0AJTMLF0UD";
 var SLACK_NOTIFY_CHANNEL_ID = "C09TRHGU64D";
 var CHATWORK_NOTIFY_ROOM_ID = "415381235";
-var D7_REVIEW_SHEET_URL = "[https://docs.google.com/spreadsheets/d/1WNT1EWFP7lNzfO5hseFyfiw3BjK9SG42XrTFKMxz4kc/edit?hl=ja&gid=1198962830#gid=1198962830](https://docs.google.com/spreadsheets/d/1WNT1EWFP7lNzfO5hseFyfiw3BjK9SG42XrTFKMxz4kc/edit?hl=ja&gid=1198962830#gid=1198962830)";
+var D7_REVIEW_SHEET_URL = "https://" + "docs.google.com/spreadsheets/d/1WNT1EWFP7lNzfO5hseFyfiw3BjK9SG42XrTFKMxz4kc/edit?hl=ja&gid=1198962830#gid=1198962830";
 
 // 『担当者』シートのキャッシュ（A〜D列の呼び名 -> D列「プルダウン名（名字）」）
 var STAFF_ALIAS_MAP = new Map();
@@ -55,7 +55,7 @@ function loadStaffMasterFromD7_(d7Ss) {
   const dropdownNames = [];
 
   const registerAlias = (aliasStr, dropdownName) => {
-    const clean = String(aliasStr || "").replace(/[\s ]+/g, "").trim();
+    const clean = String(aliasStr || "").replace(/[\s\u3000]+/g, "").trim();
     if (!clean) return;
     STAFF_ALIAS_MAP.set(clean, dropdownName);
     const stem = clean.replace(/(さん|氏|ちゃん|くん|先生)$/g, "");
@@ -76,9 +76,8 @@ function loadStaffMasterFromD7_(d7Ss) {
         const colD = String(vals[r][3] || "").trim(); // プルダウン名（名字）
         if (!colA && !colD) continue;
 
-        // D列があればD列、なければA列のスペース区切り先頭（名字）をプルダウン名とする
-        const surnameGuess = colA.split(/[\s ]+/)[0].trim();
-        const dropdownName = colD || surnameGuess || colA.replace(/[\s ]+/g, "");
+        const surnameGuess = colA.split(/[\s\u3000]+/)[0].trim();
+        const dropdownName = colD || surnameGuess || colA.replace(/[\s\u3000]+/g, "");
         if (!dropdownNames.includes(dropdownName)) {
           dropdownNames.push(dropdownName);
         }
@@ -88,8 +87,8 @@ function loadStaffMasterFromD7_(d7Ss) {
 
         STAFF_RECORDS_LIST.push({
           dropdownName,
-          fullNameClean: colA.replace(/[\s ]+/g, ""),
-          aliases: rowAliases.map(a => a.replace(/[\s ]+/g, "")).filter(Boolean)
+          fullNameClean: colA.replace(/[\s\u3000]+/g, ""),
+          aliases: rowAliases.map(a => a.replace(/[\s\u3000]+/g, "")).filter(Boolean)
         });
       }
     }
@@ -111,7 +110,7 @@ function resolveStaffByAlias_(inputStr) {
 
   const clean = String(inputStr)
     .replace(/\[To:\d+\]/gi, "")
-    .replace(/[\s ]+/g, "")
+    .replace(/[\s\u3000]+/g, "")
     .trim();
   if (!clean) return "";
 
@@ -119,7 +118,6 @@ function resolveStaffByAlias_(inputStr) {
   const withoutHonorific = clean.replace(/(さん|氏|ちゃん|くん|先生)$/g, "");
   if (STAFF_ALIAS_MAP.has(withoutHonorific)) return STAFF_ALIAS_MAP.get(withoutHonorific);
 
-  // フルネーム（例：「北村〇〇」）が渡された場合、プルダウン名（「北村」）で始まるレコードがあればそのプルダウン名を返す
   for (const rec of STAFF_RECORDS_LIST) {
     if (!rec.dropdownName) continue;
     if (
@@ -140,7 +138,7 @@ function detectStaffInEvidence_(evidenceText) {
   if (STAFF_RECORDS_LIST.length === 0) {
     loadStaffMasterFromD7_(SpreadsheetApp.getActiveSpreadsheet());
   }
-  const ev = String(evidenceText || "").replace(/[\s ]+/g, "");
+  const ev = String(evidenceText || "").replace(/[\s\u3000]+/g, "");
   if (!ev) return "";
 
   for (const rec of STAFF_RECORDS_LIST) {
@@ -161,9 +159,9 @@ function extractCleanStaffName_(rawText) {
 
   const firstPart = String(rawText || "")
     .replace(/\[To:\d+\]/gi, "")
-    .replace(/[\s ]*さん$/g, "")
+    .replace(/[\s\u3000]*さん$/g, "")
     .trim()
-    .split(/[\s ]+/)[0]
+    .split(/[\s\u3000]+/)[0]
     .trim();
 
   return resolveStaffByAlias_(firstPart) || firstPart;
@@ -177,17 +175,17 @@ function normalizeDraftMessageFormat_(draftText, staffNameRaw) {
   const cleanStaff = extractCleanStaffName_(staffNameRaw);
   let text = String(draftText);
 
-  // 1. 先頭「〇〇先生」の直後に空行があれば詰める（「松田慎平先生\n平素より〜」にする）
+  // 1. 先頭「〇〇先生」の直後に空行があれば詰める
   text = text.replace(/^([^\r\n]*?先生)[ \t]*\r?\n(?:\s*\r?\n)+/, "$1\n");
 
-  // 2. 文中の担当者名がフルネームになっていればプルダウン名（名字）に統一し、末尾署名に全角スペースを入れる
+  // 2. 文中の担当者名をプルダウン名（名字）に統一し、末尾署名に全角スペース（\u3000）を入れる
   if (cleanStaff) {
     text = text
       .replace(/ドクターサポート(事務局|部)の.*?でございます。/g, `ドクターサポート$1の${cleanStaff}でございます。`)
       .replace(/ドクターサポート(事務局|部)の.*?です。/g, `ドクターサポート$1の${cleanStaff}です。`)
-      .replace(/ドクターサポート(事務局|部)[\s ]*[^\r\n]+$/g, `ドクターサポート$1 ${cleanStaff}`);
+      .replace(/ドクターサポート(事務局|部)[\s\u3000]*[^\r\n]+$/g, `ドクターサポート$1\u3000${cleanStaff}`);
   } else {
-    text = text.replace(/ドクターサポート(事務局|部)[\s ]*([^\r\n]+)$/g, "ドクターサポート$1 $2");
+    text = text.replace(/ドクターサポート(事務局|部)[\s\u3000]*([^\r\n]+)$/g, "ドクターサポート$1\u3000$2");
   }
 
   return text;
@@ -226,7 +224,7 @@ function buildMultiDateTemplate_(entries) {
       "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
       "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
       "",
-      `ドクターサポート部 ${staffLabel}`
+      `ドクターサポート部\u3000${staffLabel}`
     ].join("\n");
   }
 
@@ -260,7 +258,7 @@ function buildMultiDateTemplate_(entries) {
       "難しい場合は現在の拠点にて採用させていただきますので、お手数をおかけいたしますが、ご検討いただけましたら幸いです。",
       "何卒よろしくお願い申し上げます。",
       "",
-      `ドクターサポート事務局 ${staffLabel}`
+      `ドクターサポート事務局\u3000${staffLabel}`
     ].join("\n");
   }
 
@@ -301,7 +299,7 @@ function buildMultiDateTemplate_(entries) {
     "お忙しいところ、ご負担をおかけして恐縮ではございますが、ご検討いただけましたら幸いです。",
     "何卒よろしくお願い申し上げます。",
     "",
-    `ドクターサポート事務局 ${staffLabel}`
+    `ドクターサポート事務局\u3000${staffLabel}`
   ].join("\n");
 }
 
@@ -347,7 +345,7 @@ function buildMessageTemplate_(params) {
         "長時間にわたり大きなご負担をおかけするお願いとなり大変心苦しい限りではございますが、ご無理のない範囲でご検討いただけますと幸いです。",
         "お忙しいところ誠に恐縮ではございますが、何卒よろしくお願い申し上げます。",
         "",
-        `ドクターサポート部 ${staffLabel}`
+        `ドクターサポート部\u3000${staffLabel}`
       ].join("\n");
     }
 
@@ -378,7 +376,7 @@ function buildMessageTemplate_(params) {
     lines.push("急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。");
     lines.push("お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。");
     lines.push("");
-    lines.push(`ドクターサポート部 ${staffLabel}`);
+    lines.push(`ドクターサポート部\u3000${staffLabel}`);
     return lines.join("\n");
   }
 
@@ -401,7 +399,7 @@ function buildMessageTemplate_(params) {
       "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
       "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
       "",
-      `ドクターサポート事務局 ${staffLabel}`
+      `ドクターサポート事務局\u3000${staffLabel}`
     ].join("\n");
   }
 
@@ -429,7 +427,7 @@ function buildMessageTemplate_(params) {
         "長時間にわたり大きなご負担をおかけするお願いとなり大変心苦しい限りではございますが、ご無理のない範囲でご検討いただけますと幸いです。",
         "お忙しいところ誠に恐縮ではございますが、何卒よろしくお願い申し上げます。",
         "",
-        `ドクターサポート事務局 ${staffLabel}`
+        `ドクターサポート事務局\u3000${staffLabel}`
       ].join("\n");
     }
 
@@ -451,7 +449,7 @@ function buildMessageTemplate_(params) {
       "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
       "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
       "",
-      `ドクターサポート事務局 ${staffLabel}`
+      `ドクターサポート事務局\u3000${staffLabel}`
     ].join("\n");
   }
 
@@ -475,7 +473,7 @@ function buildMessageTemplate_(params) {
         "難しい場合は現在の拠点にて採用させていただきますので、お手数をおかけいたしますが、ご検討いただけましたら幸いです。",
         "何卒よろしくお願い申し上げます。",
         "",
-        `ドクターサポート事務局 ${staffLabel}`
+        `ドクターサポート事務局\u3000${staffLabel}`
       ].join("\n");
     }
 
@@ -499,7 +497,7 @@ function buildMessageTemplate_(params) {
       "お忙しいところ、ご負担をおかけして恐縮ではございますが、ご検討いただけましたら幸いです。",
       "何卒よろしくお願い申し上げます。",
       "",
-      `ドクターサポート事務局 ${staffLabel}`
+      `ドクターサポート事務局\u3000${staffLabel}`
     ].join("\n");
   }
 
@@ -525,6 +523,6 @@ function buildMessageTemplate_(params) {
   lines.push("急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。");
   lines.push("お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。");
   lines.push("");
-  lines.push(`ドクターサポート事務局 ${staffLabel}`);
+  lines.push(`ドクターサポート事務局\u3000${staffLabel}`);
   return lines.join("\n");
 }

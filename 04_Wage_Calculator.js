@@ -1,16 +1,19 @@
 /**
  * ============================================================================
  * 04_Wage_Calculator.gs
- * 内閣府祝日CSV取得・D4時給表自動選択・15分刻み日給計算
- * - 午前勤務医への通し延長依頼時は「18:00まで(consultPm1DailyWage)」と「21:00まで(consultDailyWage)」の2パターンを算出
+ * 内閣府祝日CSV取得・D4時給表自動選択・15分刻み日給計算（動的ヘッダー＆全拠点対応版）
  * ============================================================================
  */
 
-let WAGE_SHEET_CACHE = {};
+let WAGE_TABLES_BY_SHEET_CACHE = null;
 
 function updateCabinetOfficeHolidays_(holSheet) {
   try {
-    const res = UrlFetchApp.fetch(CAO_HOLIDAY_CSV_URL, { muteHttpExceptions: true });
+    const csvUrl = typeof cleanUrl_ === "function"
+      ? cleanUrl_(CAO_HOLIDAY_CSV_URL)
+      : String(CAO_HOLIDAY_CSV_URL || "").replace(/^\[([^\]]+)\]\([^\)]+\)$/, "$1").trim();
+
+    const res = UrlFetchApp.fetch(csvUrl, { muteHttpExceptions: true });
     if (res.getResponseCode() !== 200) return;
 
     const csvText = res.getContentText("Shift_JIS");
@@ -45,6 +48,132 @@ function loadHolidaySet_(holSheet) {
   return set;
 }
 
+function cleanWageClinicKey_(name) {
+  return String(name || "")
+    .replace(/^[0-9０-９]+[\.．、\s\u3000]*/, "")
+    .replace(/[\(（].*?[\)）]/g, "")
+    .replace(/[ヶケが]/g, "ケ")
+    .replace(/[\s\u3000]+/g, "")
+    .trim();
+}
+
+function getAllWageTablesCached_(wageSs) {
+  if (WAGE_TABLES_BY_SHEET_CACHE) return WAGE_TABLES_BY_SHEET_CACHE;
+  if (typeof buildWageTablesForShuseikun_ === "function") {
+    WAGE_TABLES_BY_SHEET_CACHE = buildWageTablesForShuseikun_(wageSs);
+    return WAGE_TABLES_BY_SHEET_CACHE;
+  }
+
+  const wageTablesObj = {};
+  const parseYen = val => Number(String(val || "").replace(/[^0-9]/g, "")) || 0;
+
+  wageSs.getSheets().forEach(sh => {
+    const sName = sh.getName();
+    if (!sName.includes("時給") || sName.includes("医師") || sName.includes("特別")) return;
+    if (sh.getLastRow() < 2) return;
+
+    const vals = sh.getDataRange().getDisplayValues();
+    const headers = vals[0].map(h => String(h || "").trim());
+    let colClinic = headers.indexOf("拠点名");
+    let colDept = headers.indexOf("科目");
+    let colWAm = headers.indexOf("平日_午前");
+    let colSAm = headers.indexOf("土曜_午前");
+    let colHAm = headers.indexOf("日祝_午前");
+
+    if (colClinic === -1) colClinic = 1;
+    if (colDept === -1) colDept = 2;
+    if (colWAm === -1) colWAm = 3;
+    if (colSAm === -1) colSAm = 6;
+    if (colHAm === -1) colHAm = 9;
+
+    const obj = {};
+    for (let r = 1; r < vals.length; r++) {
+      const row = vals[r];
+      const base = String(row[colClinic] || "").replace(/^[0-9０-９]+[\.．、\s\u3000]*/, "").replace(/[\(（].*?[\)）]/g, "").trim();
+      if (!base || base === "拠点名") continue;
+      const deptRaw = String(row[colDept] || "小児科").trim();
+      const dept = deptRaw.includes("内科") ? "内科" : "小児科";
+      const rateData = {
+        weekday: { am: parseYen(row[colWAm]), pm: parseYen(row[colWAm + 1]), night: parseYen(row[colWAm + 2]) },
+        sat:     { am: parseYen(row[colSAm]), pm: parseYen(row[colSAm + 1]), night: parseYen(row[colSAm + 2]) },
+        sunHol:  { am: parseYen(row[colHAm]), pm: parseYen(row[colHAm + 1]), night: parseYen(row[colHAm + 2]) }
+      };
+      obj[`${base}|${dept}`] = rateData;
+      obj[`${cleanWageClinicKey_(base)}|${dept}`] = rateData;
+      if (base !== "北葛西" && base !== "亀有") {
+        obj[base] = rateData;
+        obj[cleanWageClinicKey_(base)] = rateData;
+      }
+    }
+    wageTablesObj[sName] = obj;
+  });
+
+  WAGE_TABLES_BY_SHEET_CACHE = wageTablesObj;
+  return wageTablesObj;
+}
+
+function findClinicRateInTables_(wageSs, dateStr, clinicName, dept) {
+  if (!clinicName || clinicName === "要確認") return null;
+  const allTables = getAllWageTablesCached_(wageSs);
+  const availableSheets = Object.keys(allTables);
+  if (availableSheets.length === 0) return null;
+
+  const [y, m] = String(dateStr || "2026/10/01").split("/").map(Number);
+  const fiscalYear = (m >= 1 && m <= 3) ? (y - 1) : y;
+  const halfLabel = (m >= 4 && m <= 9) ? "上期" : "下期";
+
+  const preferredOrder = [
+    `${fiscalYear}${halfLabel}時給`,
+    `${y}${halfLabel}時給`,
+    "関西拠点時給",
+    `${fiscalYear}時給`,
+    `${y}時給`
+  ];
+  availableSheets.slice().sort().reverse().forEach(s => {
+    if (!preferredOrder.includes(s)) preferredOrder.push(s);
+  });
+
+  const baseClinic = String(clinicName || "").replace(/^[0-9０-９]+[\.．、\s\u3000]*/, "").replace(/[\(（].*?[\)）]/g, "").trim();
+  const normKey = cleanWageClinicKey_(baseClinic);
+  const d = (dept === "内科") ? "内科" : "小児科";
+  const isKitaOrKame = (normKey === "北葛西" || normKey === "亀有");
+
+  for (const sName of preferredOrder) {
+    const tbl = allTables[sName];
+    if (!tbl) continue;
+
+    const strictCandidates = [
+      `${baseClinic}|${d}`,
+      `${normKey}|${d}`,
+      `${baseClinic}(${d})`,
+      `${baseClinic}（${d}）`
+    ];
+    for (const k of strictCandidates) {
+      if (tbl[k]) return { rates: tbl[k], sheetName: sName };
+    }
+
+    const keys = Object.keys(tbl);
+    for (const k of keys) {
+      const [kClinic, kDept] = k.split("|");
+      if (kDept === d && cleanWageClinicKey_(kClinic) === normKey) {
+        return { rates: tbl[k], sheetName: sName };
+      }
+    }
+
+    if (!isKitaOrKame) {
+      if (tbl[baseClinic]) return { rates: tbl[baseClinic], sheetName: sName };
+      if (tbl[normKey]) return { rates: tbl[normKey], sheetName: sName };
+      for (const k of keys) {
+        const kClinic = k.split("|")[0];
+        if (cleanWageClinicKey_(kClinic) === normKey) {
+          return { rates: tbl[k], sheetName: sName };
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function calculateWagesAndAllowance_(params) {
   const {
     wageSs, dateStr, clinicName, dept, fromClinicName,
@@ -55,7 +184,6 @@ function calculateWagesAndAllowance_(params) {
 
   const isSpecial = Boolean(isSpecialFromMtg || isSpecialFromD6);
 
-  // 午前勤務（終了が13:30以前）の医師に、夜間（20:00または21:00）までの通し延長をお願いするケースか判定
   const curEndMin = toMinutes_(currentEnd);
   const conEndMin = toMinutes_(consultEnd);
   const isMorningToNightExt =
@@ -82,50 +210,49 @@ function calculateWagesAndAllowance_(params) {
     return { status: "要確認", reason: "日付または拠点名未確定", isSpecial };
   }
 
-  const sheetNameUsed = selectWageSheetName_(dateStr, clinicName);
-  const wageTable = loadWageTableCached_(wageSs, sheetNameUsed);
-  if (!wageTable) {
-    return { status: "要確認", reason: `時給表「${sheetNameUsed}」が見つかりません`, isSpecial };
+  const targetFound = findClinicRateInTables_(wageSs, dateStr, clinicName, dept);
+  if (!targetFound || !targetFound.rates) {
+    const targetLookupKey = (clinicName === "北葛西" || clinicName === "亀有")
+      ? `${clinicName}（${dept}）`
+      : clinicName;
+    return { status: "要確認", reason: `時給表に「${targetLookupKey}」の行がありません`, isSpecial };
   }
 
+  const targetRates = targetFound.rates;
+  const sheetNameUsed = targetFound.sheetName;
   const dayCategory = getDayCategory_(dateStr, holidaySet);
-  const targetLookupKey = (clinicName === "北葛西" || clinicName === "亀有")
-    ? `${clinicName}（${dept}）`
-    : clinicName;
-  const targetRates = wageTable.get(targetLookupKey) || wageTable.get(clinicName);
-
-  if (!targetRates) {
-    return { status: "要確認", reason: `時給表に「${targetLookupKey}」の行がありません`, isSpecial, sheetNameUsed };
-  }
 
   let fromRates = targetRates;
   if (fromClinicName && fromClinicName !== clinicName && fromClinicName !== "ワクチン専任") {
-    fromRates = wageTable.get(fromClinicName) || wageTable.get(`${fromClinicName}（${dept}）`) || targetRates;
+    const fromFound = findClinicRateInTables_(wageSs, dateStr, fromClinicName, dept);
+    if (fromFound && fromFound.rates) {
+      fromRates = fromFound.rates;
+    }
   }
 
-  // 1. 現在シフトの日給計算
   let currentDailyWage = 0;
   if (currentStart && currentEnd) {
     if (isCurrentVaccine) {
       const curMins = calcWorkingMinutesExcludeBreak_(currentStart, currentEnd);
       currentDailyWage = Math.round((curMins / 60) * VACCINE_DEDICATED_HOURLY_WAGE);
     } else {
+      const isFromKita = cleanWageClinicKey_(fromClinicName || clinicName) === "北葛西";
       currentDailyWage = calcIntervalWage_(
-        currentStart, currentEnd, fromRates[dayCategory], clinicName === "北葛西", null, 0
+        currentStart, currentEnd, fromRates[dayCategory], isFromKita, null, 0
       );
     }
   }
 
-  // 2. 相談シフトの日給計算（通し延長時は18:00までのパターン①と21:00までのパターン②の両方を算出）
   const specialBonus = isSpecial ? 2000 : 0;
   let consultDailyWage = 0;
   let consultPm1DailyWage = 0;
+  const isTargetKita = cleanWageClinicKey_(clinicName) === "北葛西";
 
   if (approachType === "個別アプローチ" || approachType === "募集継続・ステイ") {
     const [absS, absE] = (absenceTime || "-").split("-");
     if (absS && absE) {
       consultDailyWage = calcIntervalWage_(
-        absS, absE, targetRates[dayCategory], clinicName === "北葛西", absenceTime, specialBonus
+        absS, absE, targetRates[dayCategory], isTargetKita, absenceTime, specialBonus
       );
     }
   } else if (approachType === "勤務地変更相談") {
@@ -141,28 +268,28 @@ function calculateWagesAndAllowance_(params) {
           night: Math.max(fromRates[dayCategory].night, targetRates[dayCategory].night)
         };
     consultDailyWage = calcIntervalWage_(
-      consultStart, consultEnd, baseMaxRates, clinicName === "北葛西", absenceTime, specialBonus
+      consultStart, consultEnd, baseMaxRates, isTargetKita, absenceTime, specialBonus
     );
   } else if ((approachType === "延長相談" || approachType === "早出相談") && isCurrentVaccine && dept !== "ワクチン専任") {
     const [absS, absE] = (absenceTime || "-").split("-");
     const addedClinicWage = (absS && absE)
-      ? calcIntervalWage_(absS, absE, targetRates[dayCategory], clinicName === "北葛西", absenceTime, specialBonus)
+      ? calcIntervalWage_(absS, absE, targetRates[dayCategory], isTargetKita, absenceTime, specialBonus)
       : 0;
     consultDailyWage = currentDailyWage + addedClinicWage;
 
     if (isMorningToNightExt && absS) {
       const addedPm1Wage = calcIntervalWage_(
-        absS, "18:00", targetRates[dayCategory], clinicName === "北葛西", absenceTime, specialBonus
+        absS, "18:00", targetRates[dayCategory], isTargetKita, absenceTime, specialBonus
       );
       consultPm1DailyWage = currentDailyWage + addedPm1Wage;
     }
   } else {
     consultDailyWage = calcIntervalWage_(
-      consultStart, consultEnd, targetRates[dayCategory], clinicName === "北葛西", absenceTime, specialBonus
+      consultStart, consultEnd, targetRates[dayCategory], isTargetKita, absenceTime, specialBonus
     );
     if (isMorningToNightExt) {
       consultPm1DailyWage = calcIntervalWage_(
-        consultStart, "18:00", targetRates[dayCategory], clinicName === "北葛西", absenceTime, specialBonus
+        consultStart, "18:00", targetRates[dayCategory], isTargetKita, absenceTime, specialBonus
       );
     }
   }
@@ -184,38 +311,6 @@ function calculateWagesAndAllowance_(params) {
     sheetNameUsed,
     wageNote: `${dayCategory === "weekday" ? "平日" : dayCategory === "sat" ? "土曜" : "日祝"} / 特別時給:${isSpecial ? "あり(通常時給+2,000円/h)" : "なし"}${isCurrentVaccine ? " / 現在枠:ワクチン専任(13,000円/h)" : ""}`
   };
-}
-
-function selectWageSheetName_(dateStr, clinicName) {
-  const [y, m] = dateStr.split("/").map(Number);
-  const term = (m >= 4 && m <= 9) ? "上期" : "下期";
-  if (clinicName === "西宮北口" || clinicName === "あべのキューズ") {
-    return "関西拠点時給";
-  }
-  return `${y}${term}時給`;
-}
-
-function loadWageTableCached_(wageSs, sheetName) {
-  if (WAGE_SHEET_CACHE[sheetName]) return WAGE_SHEET_CACHE[sheetName];
-  const sheet = wageSs.getSheetByName(sheetName);
-  if (!sheet) return null;
-
-  const vals = sheet.getDataRange().getDisplayValues();
-  const map = new Map();
-  const parseYen = s => Number(String(s || "0").replace(/[¥￥,，\s]/g, "")) || 0;
-
-  for (let r = 2; r < vals.length; r++) {
-    const row = vals[r];
-    const name = String(row[1] || "").trim();
-    if (!name) continue;
-    map.set(name, {
-      weekday: { am: parseYen(row[2]), pm: parseYen(row[3]), night: parseYen(row[4]) },
-      sat:     { am: parseYen(row[5]), pm: parseYen(row[6]), night: parseYen(row[7]) },
-      sunHol:  { am: parseYen(row[8]), pm: parseYen(row[9]), night: parseYen(row[10]) }
-    });
-  }
-  WAGE_SHEET_CACHE[sheetName] = map;
-  return map;
 }
 
 function getDayCategory_(dateStr, holidaySet) {
