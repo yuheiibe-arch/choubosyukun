@@ -16,6 +16,35 @@ function onOpen() {
     .addToUi();
 }
 
+function sortReviewRowsAndParamsByDate_(reviewRows, draftParamsByRowIdx) {
+  if (!reviewRows || reviewRows.length <= 1) return;
+
+  const combined = reviewRows.map((row, idx) => ({
+    row,
+    param: draftParamsByRowIdx[idx] || null
+  }));
+
+  combined.sort((a, b) => {
+    const dA = normalizeDateStr_(a.row[3]);
+    const dB = normalizeDateStr_(b.row[3]);
+    if (dA !== dB) return dA.localeCompare(dB);
+
+    const tA = toMinutes_(String(a.row[5] || "").split("-")[0]);
+    const tB = toMinutes_(String(b.row[5] || "").split("-")[0]);
+    const minA = isNaN(tA) ? 9999 : tA;
+    const minB = isNaN(tB) ? 9999 : tB;
+    return minA - minB;
+  });
+
+  for (let i = 0; i < combined.length; i++) {
+    reviewRows[i] = combined[i].row;
+    draftParamsByRowIdx[i] = combined[i].param;
+    if (draftParamsByRowIdx[i]) {
+      draftParamsByRowIdx[i].rowIndex = i;
+    }
+  }
+}
+
 function importLatestJsonAndBuildReview() {
   const d7Ss = SpreadsheetApp.getActiveSpreadsheet();
   let revSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_REVIEW);
@@ -321,7 +350,8 @@ function importLatestJsonAndBuildReview() {
         doctorClinicRowMap.set(mergeKey, reviewRows.length);
         doctorClinicRowMap.set(mergeKey + "_EVIDENCE", combinedEvidence);
       }
-      if (approachType === "個別アプローチ" && clinicName && clinicName !== "要確認") {
+      // ★個別アプローチで医師名が未指定（!finalDocName）の場合のみ、候補医師10名を自動抽出してセットする（指名医師がいる場合は上書きしない）
+      if (approachType === "個別アプローチ" && !finalDocName && clinicName && clinicName !== "要確認") {
         individualTargetRows.push({
           rowIndex: reviewRows.length,
           dateStr,
@@ -344,15 +374,20 @@ function importLatestJsonAndBuildReview() {
     );
   }
 
+  sortReviewRowsAndParamsByDate_(reviewRows, draftParamsByRowIdx);
+
   consolidateMultiDateDoctorDrafts_(reviewRows, draftParamsByRowIdx);
 
-  // ★全行の「担当者（P列）」をプルダウンの名字に統一し、「送信文案（Q列）」の1行目改行と末尾全角スペースを正規化する
   for (let r = 0; r < reviewRows.length; r++) {
     const cleanStaff = extractCleanStaffName_(reviewRows[r][15]);
     reviewRows[r][15] = cleanStaff;
     if (reviewRows[r][16]) {
       reviewRows[r][16] = normalizeDraftMessageFormat_(reviewRows[r][16], cleanStaff);
     }
+  }
+
+  if (confirmRows.length > 1) {
+    confirmRows.sort((a, b) => normalizeDateStr_(a[1]).localeCompare(normalizeDateStr_(b[1])));
   }
 
   writeDataExactRows_(revSheet, reviewRows, 24);

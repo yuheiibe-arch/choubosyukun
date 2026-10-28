@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * 07_Shuseikun_Backend.gs
- * 「修正くん」メイン処理・D6作業メモ同期・レビューシート移動処理（個別候補抽出＆日付順挿入対応）
+ * 「修正くん」メイン処理・D6作業メモ同期・レビューシート移動処理（個別候補抽出＆日付順挿入＆進捗トースト対応）
  * ============================================================================
  */
 
@@ -306,10 +306,17 @@ function getShuseikunInitData() {
  */
 function insertReviewRowSortedByDate_(revSheet, newRow, numCols) {
   var lastRow = revSheet.getLastRow();
-  var isRow2Empty = (lastRow <= 1) || (lastRow === 2 && String(revSheet.getRange(2, 4).getDisplayValue() || "").trim() === "");
+  var isRow2Empty = (lastRow <= 1) || (
+    lastRow === 2 &&
+    String(revSheet.getRange(2, 4).getDisplayValue() || "").trim() === "" &&
+    String(revSheet.getRange(2, 5).getDisplayValue() || "").trim() === ""
+  );
 
   if (isRow2Empty) {
-    revSheet.getRange(2, 1, 1, newRow.length).setValues([newRow]);
+    revSheet.getRange(2, 1, 1, newRow.length)
+      .setValues([newRow])
+      .setBackground("#ffffff")
+      .setFontColor("#000000");
     trimBlankRowsAndCols_(revSheet, numCols || newRow.length);
     return 2;
   }
@@ -352,8 +359,16 @@ function insertReviewRowSortedByDate_(revSheet, newRow, numCols) {
   return targetRowNum;
 }
 
+/**
+ * 修正くんから「⭕ OK（文案・Slackレビューへ移す）」が押されたときのメイン処理
+ * - 個別アプローチ時は確実に勤務くんスキャン＆候補抽出を回し、進捗をトースト表示
+ * - 日付順（同日内は開始時刻順）でレビューシートへ挿入
+ * - 確認リストの最後の1行（2行目）でもエラーにならず確実に削除・クリア
+ */
 function commitShuseikunItemToReview(payload) {
   var d7Ss = SpreadsheetApp.getActiveSpreadsheet();
+  d7Ss.toast("① 修正くんの入力データを受け取りました...", "🕹️ 修正くん転送中", 10);
+
   var revSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_REVIEW);
   var confSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_CONFIRM);
   var logSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_LOG);
@@ -370,7 +385,12 @@ function commitShuseikunItemToReview(payload) {
   var d6ClinicKey = isKitaOrKame ? (clinicName + " (" + dept + ")") : clinicName;
   var absenceTime = normalizeTimeRange_(payload.absenceTime);
   var approachType = String(payload.approachType || "").trim();
+
   var doctorName = String(payload.doctorName || "").replace(/先生$/g, "").trim();
+  if (doctorName === "{医師名}" || doctorName === "候補医師" || doctorName === "候補医師抽出対象" || doctorName === "該当候補なし" || doctorName === "対象未定") {
+    doctorName = "";
+  }
+
   var fromClinic = cleanClinicBaseName_(payload.fromClinic);
   var currentShiftLabel = String(payload.currentShiftLabel || "-").trim();
   var consultShiftLabel = String(payload.consultShiftLabel || (d6ClinicKey + " " + absenceTime)).trim();
@@ -382,7 +402,7 @@ function commitShuseikunItemToReview(payload) {
   var draftMessage = normalizeDraftMessageFormat_(payload.draftMessage || "", staffName);
   var evidence = String(payload.evidence || "");
 
-  var isAutoExtractIndividual = (approachType === "個別アプローチ") && (!doctorName || doctorName === "{医師名}" || doctorName === "候補医師");
+  var isAutoExtractIndividual = (approachType === "個別アプローチ") && !doctorName;
   var targetDocForMemo = isAutoExtractIndividual ? "候補医師抽出対象" : doctorName;
   var naturalMemo = isAutoExtractIndividual
     ? "候補医師抽出対象に個別アプローチ交渉"
@@ -402,9 +422,17 @@ function commitShuseikunItemToReview(payload) {
     slackBody, evidenceFull, "", ""
   ];
 
+  var extractedCount = doctorName ? 1 : 0;
+
   // ★個別アプローチで医師名が未指定の場合は、過去実績・同曜日・除外条件・打診履歴から候補医師を自動抽出する
   if (isAutoExtractIndividual && clinicName && typeof populateIndividualApproachCandidates_ === "function") {
     try {
+      d7Ss.toast(
+        "② 【" + d6ClinicKey + " " + absenceTime + "】の個別アプローチ候補医師を勤務くん過去実績・NG条件から抽出中...",
+        "🔍 個別アプローチ候補抽出中",
+        30
+      );
+
       var unfilledSs = SpreadsheetApp.openById(EXTERNAL_IDS.D6_D3_UNFILLED_SS);
       var wageSs = SpreadsheetApp.openById(EXTERNAL_IDS.D4_D5_WAGE_SS);
       var d5ClinicSheet = wageSs.getSheetByName(SHEET_NAMES.D5_CLINICS);
@@ -415,15 +443,21 @@ function commitShuseikunItemToReview(payload) {
 
       // 既存のレビューシート行も一時配列に含めて同日重複打診を除外できるようにする
       var tempReviewRows = [newRow];
-      if (revSheet.getLastRow() >= 2) {
-        var existingRows = revSheet.getRange(2, 1, revSheet.getLastRow() - 1, 24).getDisplayValues();
-        for (var er = 0; er < existingRows.length; er++) {
-          tempReviewRows.push(existingRows[er]);
+      if (revSheet && revSheet.getLastRow() >= 2) {
+        var firstCellCheck = String(revSheet.getRange(2, 4).getDisplayValue() || "").trim();
+        if (firstCellCheck !== "") {
+          var existingRows = revSheet.getRange(2, 1, revSheet.getLastRow() - 1, 24).getDisplayValues();
+          for (var er = 0; er < existingRows.length; er++) {
+            tempReviewRows.push(existingRows[er]);
+          }
         }
       }
 
       var absParts = String(absenceTime || "-").split("-");
       var draftParams = {
+        rowIndex: 0,
+        rowState: "未レビュー",
+        dateStr: dateStr,
         isFullTime: false,
         doctorName: "{医師名}",
         staffName: staffName,
@@ -450,9 +484,12 @@ function commitShuseikunItemToReview(payload) {
         isPublicRecruit: true
       };
 
+      var tempDraftParams = new Array(tempReviewRows.length).fill(null);
+      tempDraftParams[0] = draftParams;
+
       populateIndividualApproachCandidates_(
         tempReviewRows,
-        [draftParams],
+        tempDraftParams,
         [{
           rowIndex: 0,
           dateStr: dateStr,
@@ -469,9 +506,27 @@ function commitShuseikunItemToReview(payload) {
       if (newRow[16]) {
         newRow[16] = normalizeDraftMessageFormat_(newRow[16], staffName);
       }
+
+      var extractedNamesStr = String(newRow[8] || "").trim();
+      extractedCount = (extractedNamesStr && extractedNamesStr !== "該当候補なし")
+        ? extractedNamesStr.split(/\r?\n/).filter(Boolean).length
+        : 0;
+
+      d7Ss.toast(
+        "③ 候補医師 " + extractedCount + " 名を抽出しました！日付順でレビュー表へ挿入します...",
+        "🔍 候補抽出完了",
+        5
+      );
     } catch (e) {
       console.error("個別アプローチ候補抽出エラー: " + e.message);
+      d7Ss.toast("⚠️ 候補抽出中にエラーが発生しましたが転送を続行します: " + e.message, "注意", 5);
     }
+  } else {
+    d7Ss.toast(
+      "② 【" + d6ClinicKey + "】(" + approachType + ") を日付順でレビュー表へ挿入しています...",
+      "📝 レビュー表へ転記中",
+      5
+    );
   }
 
   // ★日付順（同日内は開始時刻順）の正しい行位置に挿入する
@@ -499,6 +554,7 @@ function commitShuseikunItemToReview(payload) {
   revSheet.getRange(addedRowNum, 20).setDataValidation(postTypeRule);
   applyLeftMiddleToSheet_(revSheet);
 
+  // ★確認リストから該当行を安全に削除（最後の1行＝2行目でもエラーにならない）
   deleteConfirmRowByMatch_(confSheet, payload.sheetRow, dateStr, payload.origRawClinicName || payload.rawClinicName, evidence);
 
   if (logSheet) {
@@ -506,41 +562,100 @@ function commitShuseikunItemToReview(payload) {
     appendRowAndTrimBlank_(logSheet, [nowStr, "修正くん移動", "-", dateStr + " " + d6ClinicKey, 1, newRow[17]], 6);
   }
 
-  return { ok: true, addedRowNum: addedRowNum };
+  SpreadsheetApp.flush();
+
+  var finishMsg = (approachType === "個別アプローチ")
+    ? "【" + d6ClinicKey + "】個別アプローチ（候補:" + extractedCount + "名）をレビュー表の" + addedRowNum + "行目へ転送しました！"
+    : "【" + d6ClinicKey + "】(" + approachType + ") をレビュー表の" + addedRowNum + "行目へ転送しました！";
+  d7Ss.toast(finishMsg, "🎉 転送完了", 6);
+
+  return {
+    ok: true,
+    addedRowNum: addedRowNum,
+    approachType: approachType,
+    extractedCount: extractedCount
+  };
 }
 
 function discardShuseikunConfirmItem(payload) {
   var d7Ss = SpreadsheetApp.getActiveSpreadsheet();
   var confSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_CONFIRM);
-  deleteConfirmRowByMatch_(confSheet, payload.sheetRow, dateStr, payload.origRawClinicName || payload.rawClinicName, payload.evidence);
+  var targetDateStr = payload ? payload.dateStr : "";
+  var targetRawClinic = payload ? (payload.origRawClinicName || payload.rawClinicName) : "";
+  var targetEvidence = payload ? payload.evidence : "";
+  var rowHint = payload ? payload.sheetRow : -1;
+
+  deleteConfirmRowByMatch_(confSheet, rowHint, targetDateStr, targetRawClinic, targetEvidence);
+  SpreadsheetApp.flush();
+  d7Ss.toast("確認リストから対象行を削除しました。", "🗑️ 削除完了", 4);
   return { ok: true };
 }
 
+/**
+ * 確認リストの該当行を特定して削除する（最後の1行＝2行目のみのときはclearContentで安全に空にする）
+ */
 function deleteConfirmRowByMatch_(confSheet, sheetRowHint, dateStr, rawClinicName, evidence) {
-  if (!confSheet || confSheet.getLastRow() < 2) return;
+  if (!confSheet) return;
   var lastRow = confSheet.getLastRow();
+  if (lastRow < 2) return;
+
   var vals = confSheet.getRange(2, 1, lastRow - 1, 11).getDisplayValues();
+  var normTargetDate = normalizeDateStr_(dateStr);
+  var normTargetEv = String(evidence || "").replace(/\s+/g, "").trim();
+  var normTargetRawClinic = String(rawClinicName || "").trim();
+  var hintRow = Number(sheetRowHint || 0);
+
   var targetRowToDelete = -1;
 
-  for (var i = 0; i < vals.length; i++) {
-    var rDate = normalizeDateStr_(vals[i][1]);
-    var rEv = String(vals[i][10] || "").trim();
-    if (rDate === normalizeDateStr_(dateStr) && rEv === String(evidence || "").trim()) {
-      targetRowToDelete = i + 2;
-      break;
+  // 1) まずは sheetRowHint の行が対象データと一致しているか確認
+  if (hintRow >= 2 && hintRow <= lastRow) {
+    var hRow = vals[hintRow - 2];
+    var hDate = normalizeDateStr_(hRow[1]);
+    var hEv = String(hRow[10] || "").replace(/\s+/g, "").trim();
+    if (hDate === normTargetDate && (!normTargetEv || hEv === normTargetEv)) {
+      targetRowToDelete = hintRow;
     }
   }
 
-  if (targetRowToDelete === -1 && sheetRowHint >= 2 && sheetRowHint <= lastRow) {
-    targetRowToDelete = sheetRowHint;
+  // 2) 行番号がズレていた場合は全行スキャン（日付＋発言一致、または日付＋元拠点名一致）
+  if (targetRowToDelete === -1) {
+    for (var i = 0; i < vals.length; i++) {
+      var rDate = normalizeDateStr_(vals[i][1]);
+      var rRawClinic = String(vals[i][2] || "").trim();
+      var rEv = String(vals[i][10] || "").replace(/\s+/g, "").trim();
+      if (rDate === normTargetDate && ((normTargetEv && rEv === normTargetEv) || (normTargetRawClinic && rRawClinic === normTargetRawClinic))) {
+        targetRowToDelete = i + 2;
+        break;
+      }
+    }
   }
 
-  if (targetRowToDelete !== -1) {
-    if (confSheet.getMaxRows() > 2) {
-      confSheet.deleteRow(targetRowToDelete);
-    } else {
-      confSheet.getRange(2, 1, 1, 11).clearContent();
-    }
-    trimBlankRowsAndCols_(confSheet, 11);
+  // 3) それでも見つからない場合、シート上にデータ行が1行（2行目のみ）しかなければ2行目を対象にする
+  var nonEmptyRowIndices = [];
+  for (var j = 0; j < vals.length; j++) {
+    var hasVal = vals[j].some(function(cell) { return String(cell || "").trim() !== ""; });
+    if (hasVal) nonEmptyRowIndices.push(j + 2);
   }
+
+  if (targetRowToDelete === -1) {
+    if (nonEmptyRowIndices.length === 1) {
+      targetRowToDelete = nonEmptyRowIndices[0];
+    } else if (hintRow >= 2 && hintRow <= lastRow) {
+      targetRowToDelete = hintRow;
+    }
+  }
+
+  if (targetRowToDelete === -1) return;
+
+  // ★最後の1行（2行目のみ）のときに deleteRow を呼ぶとGAS仕様エラーになるため clearContent で消去する
+  if (confSheet.getMaxRows() <= 2 || nonEmptyRowIndices.length <= 1) {
+    confSheet.getRange(2, 1, 1, confSheet.getMaxColumns())
+      .clearContent()
+      .clearDataValidations();
+  } else {
+    confSheet.deleteRow(targetRowToDelete);
+  }
+
+  trimBlankRowsAndCols_(confSheet, 11);
+  applyLeftMiddleToSheet_(confSheet);
 }

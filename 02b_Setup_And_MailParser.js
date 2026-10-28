@@ -126,50 +126,79 @@ function consolidateMultiDateDoctorDrafts_(reviewRows, draftParamsByRowIdx) {
   }
 }
 
+/**
+ * 分割送信された複数の【Agent解析JSON】メール（Part 1, Part 2...）をすべて収集・結合する
+ * - 件名に [Part 1/2] が付いていても、付いていなくても（同件名で2通届いても）上書きせず全通を時系列順に統合する
+ * - 空配列 [] や「文字起こしなし」のメールは無視する
+ */
 function collectLatestJsonBatchFromGmail_() {
   const threads = GmailApp.search('subject:"【Agent解析JSON"', 0, 5);
   if (!threads || threads.length === 0) return null;
 
-  const allMsgs = [];
+  const validMsgs = [];
   for (const th of threads) {
     for (const m of th.getMessages()) {
-      allMsgs.push(m);
+      const rawBody = String(m.getPlainBody() || "").trim();
+      if (!rawBody || rawBody === "[]" || rawBody.includes("文字起こしなし")) continue;
+
+      const parsed = parseEmailJsonSafely_(rawBody);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const validItems = parsed.filter(item => item && item.status !== "文字起こしなし" && (item.date || item.clinic_name || item.raw_clinic_name));
+        if (validItems.length > 0) {
+          validMsgs.push({
+            msg: m,
+            items: validItems,
+            bodyHash: rawBody.length + "_" + rawBody.slice(0, 120)
+          });
+        }
+      }
     }
   }
-  allMsgs.sort((a, b) => a.getDate().getTime() - b.getDate().getTime());
-  const latestMsg = allMsgs[allMsgs.length - 1];
+
+  if (validMsgs.length === 0) return null;
+
+  validMsgs.sort((a, b) => a.msg.getDate().getTime() - b.msg.getDate().getTime());
+  const latestEntry = validMsgs[validMsgs.length - 1];
+  const latestMsg = latestEntry.msg;
   const latestTime = latestMsg.getDate().getTime();
   const latestMsgDateYmd = Utilities.formatDate(latestMsg.getDate(), "Asia/Tokyo", "yyyy/MM/dd");
 
-  const batchMsgs = allMsgs.filter(m => Math.abs(latestTime - m.getDate().getTime()) <= 20 * 60 * 1000);
-  const partMap = new Map();
-  for (const m of batchMsgs) {
-    const subj = m.getSubject();
-    const partMatch = subj.match(/\[Part\s*(\d+)\/(\d+)\]/i);
-    const key = partMatch ? ("Part_" + partMatch[1]) : "Single";
-    partMap.set(key, m);
+  // 最新の有効メールから前後20分以内に届いた全分割メールを対象にする
+  const batchEntries = validMsgs.filter(e => Math.abs(latestTime - e.msg.getDate().getTime()) <= 20 * 60 * 1000);
+
+  // 同一本文の重複転送だけを除外し、Part 1（例:30件）と Part 2（例:8件）は両方とも残す
+  const uniqueBatchEntries = [];
+  const seenBodyHashes = new Set();
+  for (const entry of batchEntries) {
+    if (!seenBodyHashes.has(entry.bodyHash)) {
+      seenBodyHashes.add(entry.bodyHash);
+      uniqueBatchEntries.push(entry);
+    }
   }
 
-  const selectedMsgs = Array.from(partMap.values());
   const mergedItems = [];
-  const seenKeys = new Set();
+  const seenItemKeys = new Set();
 
-  for (const m of selectedMsgs) {
-    const parsed = parseEmailJsonSafely_(m.getPlainBody());
-    if (Array.isArray(parsed)) {
-      for (const item of parsed) {
-        const dedupKey = [item.date, item.raw_clinic_name, item.target_time, item.approach_type, item.target_doctor].join("|");
-        if (!seenKeys.has(dedupKey)) {
-          seenKeys.add(dedupKey);
-          mergedItems.push(item);
-        }
+  for (const entry of uniqueBatchEntries) {
+    for (const item of entry.items) {
+      const dedupKey = [
+        item.date || "",
+        item.raw_clinic_name || "",
+        item.target_time || "",
+        item.approach_type || "",
+        item.target_doctor || ""
+      ].join("|");
+
+      if (!seenItemKeys.has(dedupKey)) {
+        seenItemKeys.add(dedupKey);
+        mergedItems.push(item);
       }
     }
   }
 
   return {
     items: mergedItems,
-    msgCount: selectedMsgs.length,
+    msgCount: uniqueBatchEntries.length,
     latestMsgId: latestMsg.getId(),
     latestSubject: latestMsg.getSubject(),
     latestMsgDateYmd: latestMsgDateYmd
@@ -178,7 +207,7 @@ function collectLatestJsonBatchFromGmail_() {
 
 function parseEmailJsonSafely_(rawText) {
   if (!rawText) return null;
-  const match = rawText.match(/\[[\s\S]*\]/);
+  const match = String(rawText).match(/\[[\s\S]*\]/);
   if (!match) return null;
 
   let jsonStr = match[0];
@@ -209,5 +238,11 @@ function parseEmailJsonSafely_(rawText) {
       cleaned += ch;
     }
   }
-  return JSON.parse(cleaned);
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    console.log("JSONパースエラーをスキップしました: " + e.message);
+    return null;
+  }
 }

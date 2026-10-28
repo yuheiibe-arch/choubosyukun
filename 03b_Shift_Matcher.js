@@ -3,6 +3,7 @@
  * 03b_Shift_Matcher.gs
  * D6（アプローチシート）・D3（貼付用シート）の読込 ＆ 当日シフト突合
  * - 移動相談時に発言内で「前倒し・早出・延長・通し」があれば15:00-21:00等へ自動拡大
+ * - 個別アプローチ時の別医師（当日他拠点勤務医）への誤マッチ・時間汚染を防止
  * ============================================================================
  */
 
@@ -204,24 +205,20 @@ function matchD6RowsSmart_(d6Data, dateStr, clinicName, dept, targetTime, isKita
 
 /**
  * MTG発言（evidence）の中に、移動対象の医師本人に対する「前倒し・早出・延長・通し」等の時間拡大依頼が含まれているか判定する
- * ※「川口から移動してもらって川口延長で…」のように移動元拠点の穴埋めとして「(移動元)延長」と言っているケースは除外する
  */
 function hasTimeExpansionIntentForMover_(evidenceText, fromClinicName) {
   const ev = String(evidenceText || "");
   if (!ev) return false;
 
-  // 「とりあえず」「まずは」で夜間のみ等に絞っている発言は拡大しない
   if ((ev.includes("とりあえず") || ev.includes("まずは") || ev.includes("一旦")) &&
       !ev.includes("前倒") && !ev.includes("早出") && !ev.includes("通し") && !ev.includes("投資")) {
     return false;
   }
 
-  // 前倒し・早出・通し（音声誤変換の「投資」含む）・フル勤務の明示キーワード
   if (/前倒|早出|通し|投資の勤務|フルで|終日|1日|一日|午後から|15時から|午前から|9時から/.test(ev)) {
     return true;
   }
 
-  // 「延長」が含まれる場合、「(移動元拠点)延長」「(移動元拠点)は延長」でなければ移動先での延長依頼と判定
   if (ev.includes("延長")) {
     if (fromClinicName && (ev.includes(`${fromClinicName}延長`) || ev.includes(`${fromClinicName}は延長`) || ev.includes(`${fromClinicName}の延長`))) {
       return false;
@@ -249,6 +246,50 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     if (d6Row || (absEndMin && absEndMin > 19 * 60) || isPmVaccineAlreadyFilled) {
       targetDept = (d6Row && d6Row.dept) ? d6Row.dept : "小児科";
     }
+  }
+
+  // ★個別アプローチ（新規打診）の場合：当日他拠点の別医師（例：奥山舞→青山舞）へ誤マッチさせず、不在時間そのまま（例：18:00-21:00）で打診する
+  if (resolvedApproachType === "個別アプローチ") {
+    const targetClinicDisp = d6Row ? d6Row.clinicRaw : (targetDept === "ワクチン専任" ? `${clinicName}(ワクチン専任)` : clinicName);
+    if (!cleanTarget) {
+      return {
+        status: "OK",
+        resolvedApproachType: "個別アプローチ",
+        resolvedDept: targetDept,
+        doctorName: "",
+        currentShiftLabel: "-",
+        consultStart: absStart || "",
+        consultEnd: absEnd || "",
+        consultShiftLabel: `個別アプローチ(${effectiveAbsenceTime})`
+      };
+    }
+
+    const normTarget = toStandardKanji_(cleanTarget);
+    const exactDoc = d3Data.find(s => s.normName === normTarget) ||
+                     d3Data.find(s => s.normLast === normTarget);
+    const resolvedDocName = exactDoc ? exactDoc.docName : cleanTarget;
+    const isFullTimeDoc = exactDoc ? exactDoc.isFullTime : false;
+
+    return {
+      status: "OK",
+      resolvedApproachType: "個別アプローチ",
+      resolvedDept: targetDept,
+      doctorName: resolvedDocName,
+      fromClinic: "",
+      isCurrentVaccine: false,
+      currentClinicLabel: "-",
+      currentStart: "",
+      currentEnd: "",
+      consultStart: absStart || "",
+      consultEnd: absEnd || "",
+      hasTimeExpansion: false,
+      consultNoteSuffix: "",
+      currentShiftLabel: "-",
+      consultShiftLabel: `${targetClinicDisp} ${effectiveAbsenceTime}`,
+      isFullTime: isFullTimeDoc,
+      alreadyHasAllowance: false,
+      evidenceNote: exactDoc ? "個別アプローチ指名医師(D3マスタ一致)" : "個別アプローチ指名医師"
+    };
   }
 
   if (d6Row && (resolvedApproachType === "延長相談" || resolvedApproachType === "早出相談")) {
@@ -346,8 +387,6 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
       } else if (resolvedApproachType === "延長相談" && absEnd) {
         cEnd = absEnd;
       } else if (resolvedApproachType === "勤務地変更相談" && absStart && absEnd) {
-        // ★発言内に「前倒し」「早出」「延長」「通し」等の時間拡大依頼がある場合（またはワクチン専任から小児科へ移る場合）は、
-        // 移動先の不在時間（例：15:00-21:00 や 09:00-21:00）へ相談シフトを拡大する！
         if (absStart === "09:00" && absEnd === "21:00") {
           cStart = absStart;
           cEnd = absEnd;
@@ -399,14 +438,14 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     }
   }
 
-  if (resolvedApproachType === "募集継続・ステイ" || resolvedApproachType === "個別アプローチ") {
+  if (resolvedApproachType === "募集継続・ステイ") {
     return {
       status: "OK",
       resolvedApproachType,
       resolvedDept: targetDept,
       doctorName: "",
       currentShiftLabel: "-",
-      consultShiftLabel: resolvedApproachType === "個別アプローチ" ? `個別アプローチ(${effectiveAbsenceTime})` : "ステイ"
+      consultShiftLabel: "ステイ"
     };
   }
 

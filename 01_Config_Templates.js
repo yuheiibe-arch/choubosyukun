@@ -191,6 +191,14 @@ function normalizeDraftMessageFormat_(draftText, staffNameRaw) {
   return text;
 }
 
+function getCircledNumber_(num) {
+  const circled = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"];
+  return circled[num - 1] || `(${num})`;
+}
+
+/**
+ * 同一医師に対する複数日・または同日複数拠点の移動打診を1通のメッセージに統合する
+ */
 function buildMultiDateTemplate_(entries) {
   if (!entries || entries.length === 0) return "";
   if (entries.length === 1) return buildMessageTemplate_(entries[0]);
@@ -199,15 +207,30 @@ function buildMultiDateTemplate_(entries) {
   const docHonorific = `${first.doctorName}先生`;
   const staffLabel = extractCleanStaffName_(first.staffName) || "{担当者名}";
 
+  // 日付ごとにグループ化（同日に複数拠点が提案されている場合は1つの日付ブロック内で ご相談①, ② として並記する）
+  const dateGroupMap = new Map();
+  for (const e of entries) {
+    if (!dateGroupMap.has(e.dateStr)) {
+      dateGroupMap.set(e.dateStr, []);
+    }
+    dateGroupMap.get(e.dateStr).push(e);
+  }
+  const dateGroups = Array.from(dateGroupMap.values());
+  const uniqueDateLabels = dateGroups.map(g => (g[0].isTomorrow ? "明日" : "") + formatMdDay_(g[0].dateObj)).join("、");
+
   if (first.isFullTime) {
-    const dateLabels = entries.map(e => (e.isTomorrow ? "明日" : "") + formatMdDay_(e.dateObj)).join("、");
-    const blocks = entries.map(e => {
-      const ymd = formatYmdDay_(e.dateObj);
-      const fromC = e.approachType === "勤務地変更相談" ? e.fromClinicName : (e.currentClinicLabel || e.clinicName);
+    const blocks = dateGroups.map(group => {
+      const gFirst = group[0];
+      const ymd = formatYmdDay_(gFirst.dateObj);
+      const fromC = gFirst.approachType === "勤務地変更相談" ? gFirst.fromClinicName : (gFirst.currentClinicLabel || gFirst.clinicName);
+      const consultLines = group.map((e, idx) => {
+        const prefix = group.length > 1 ? `ご相談${getCircledNumber_(idx + 1)})` : "ご相談)";
+        return `${prefix} 【${e.clinicName}】${e.consultStart}~${e.consultEnd}`;
+      });
       return [
         `・${ymd}`,
-        `現在)【${fromC}】${e.currentStart}~${e.currentEnd}`,
-        `ご相談) 【${e.clinicName}】${e.consultStart}~${e.consultEnd}`
+        `現在)【${fromC}】${gFirst.currentStart}~${gFirst.currentEnd}`,
+        ...consultLines
       ].join("\n");
     }).join("\n\n");
 
@@ -216,7 +239,7 @@ function buildMultiDateTemplate_(entries) {
       "お疲れ様です。",
       `ドクターサポート部の${staffLabel}です。`,
       "",
-      `この度は、${dateLabels}のご勤務につきましてご相談がありご連絡させていただきました。`,
+      `この度は、${uniqueDateLabels}のご勤務につきましてご相談がありご連絡させていただきました。`,
       "医師不在となる可能性がある拠点があり、大変恐縮ではございますがもし先生のご都合がよろしければ、下記のご勤務変更・ご調整をいただくことは可能でしょうか。",
       "",
       blocks,
@@ -230,16 +253,20 @@ function buildMultiDateTemplate_(entries) {
 
   if (first.shiftType === "応募") {
     const m = first.dateObj.getMonth() + 1;
-    const dateLabels = entries.map(e => formatMdDay_(e.dateObj)).join("、");
-    const countPrefix = entries.length === 2 ? "両日とも" : "いずれも";
-    const blocks = entries.map(e => {
-      const ymd = formatYmdDay_(e.dateObj);
-      const curW = formatComma_(e.currentDailyWage);
-      const conW = formatComma_(e.consultDailyWage);
+    const countPrefix = dateGroups.length === 1 ? "当日" : (dateGroups.length === 2 ? "両日とも" : "いずれも");
+    const blocks = dateGroups.map(group => {
+      const gFirst = group[0];
+      const ymd = formatYmdDay_(gFirst.dateObj);
+      const curW = formatComma_(gFirst.currentDailyWage);
+      const consultLines = group.map((e, idx) => {
+        const prefix = group.length > 1 ? `ご相談${getCircledNumber_(idx + 1)})` : "ご相談)";
+        const conW = formatComma_(e.consultDailyWage);
+        return `${prefix} 【${e.clinicName}】${e.consultStart}~${e.consultEnd} 日給${conW}円`;
+      });
       return [
         `■${ymd}`,
-        `現在)【${e.fromClinicName}】${e.currentStart}~${e.currentEnd} 日給${curW}円`,
-        `ご相談) 【${e.clinicName}】${e.consultStart}~${e.consultEnd} 日給${conW}円`
+        `現在)【${gFirst.fromClinicName}】${gFirst.currentStart}~${gFirst.currentEnd} 日給${curW}円`,
+        ...consultLines
       ].join("\n");
     }).join("\n\n");
 
@@ -249,7 +276,7 @@ function buildMultiDateTemplate_(entries) {
       `ドクターサポート事務局の${staffLabel}でございます。`,
       "",
       `このたびは${m}月に多くのご応募いただき、誠にありがとうございます。`,
-      `恐れ入りますが、${dateLabels}のご応募につきまして、ご相談差し上げたくご連絡いたしました。`,
+      `恐れ入りますが、${uniqueDateLabels}のご応募につきまして、ご相談差し上げたくご連絡いたしました。`,
       `${countPrefix}医師不在の拠点が多く、もし先生のご都合がよろしければ、ご勤務地を変更いただくことは可能でしょうか。`,
       "その際は時給を高時給の拠点に合わせてご案内させていただきます。",
       "",
@@ -262,24 +289,32 @@ function buildMultiDateTemplate_(entries) {
     ].join("\n");
   }
 
-  const dateLabels = entries.map(e => (e.isTomorrow ? "明日" : "") + formatMdDay_(e.dateObj)).join("、");
   const uniqueFrom = Array.from(new Set(entries.map(e => e.fromClinicName)));
   const uniqueTo = Array.from(new Set(entries.map(e => e.clinicName)));
-  const routeSentence = (uniqueFrom.length === 1 && uniqueTo.length === 1)
-    ? `当日のご勤務拠点を 【${uniqueFrom[0]}】 より 【${uniqueTo[0]}】 へご変更いただくことは可能でしょうか。`
-    : "当日のご勤務拠点を下記の通りご変更いただくことは可能でしょうか。";
+  let routeSentence = "当日のご勤務拠点を下記の通りご変更いただくことは可能でしょうか。";
+  if (uniqueFrom.length === 1 && uniqueTo.length === 1) {
+    routeSentence = `当日のご勤務拠点を 【${uniqueFrom[0]}】 より 【${uniqueTo[0]}】 へご変更いただくことは可能でしょうか。`;
+  } else if (dateGroups.length === 1 && uniqueFrom.length === 1 && uniqueTo.length > 1) {
+    const toListStr = uniqueTo.map(c => `【${c}】`).join(" または ");
+    routeSentence = `当日のご勤務拠点を 【${uniqueFrom[0]}】 より ${toListStr} へご変更いただくことは可能でしょうか。`;
+  }
 
-  const blocks = entries.map(e => {
-    const md = formatMdDay_(e.dateObj);
-    const curW = formatComma_(e.currentDailyWage);
-    const conW = formatComma_(e.consultDailyWage);
-    const allowSuffix = e.hasRequestAllow ? "+依頼手当10,000円" : "";
-    const fromC = e.approachType === "勤務地変更相談" ? e.fromClinicName : (e.currentClinicLabel || e.clinicName);
+  const blocks = dateGroups.map(group => {
+    const gFirst = group[0];
+    const md = formatMdDay_(gFirst.dateObj);
+    const curW = formatComma_(gFirst.currentDailyWage);
+    const fromC = gFirst.approachType === "勤務地変更相談" ? gFirst.fromClinicName : (gFirst.currentClinicLabel || gFirst.clinicName);
+    const consultLines = group.map((e, idx) => {
+      const prefix = group.length > 1 ? `ご相談${getCircledNumber_(idx + 1)})` : "ご相談)";
+      const conW = formatComma_(e.consultDailyWage);
+      const allowSuffix = e.hasRequestAllow ? "+依頼手当10,000円" : "";
+      return `${prefix} 【${e.clinicName}】${e.consultStart}~${e.consultEnd}(日給:${conW}円${allowSuffix})`;
+    });
     return [
       `■${md}`,
-      `現在)【${fromC}】 ${e.currentStart}~${e.currentEnd} (日給:${curW}円)`,
+      `現在)【${fromC}】 ${gFirst.currentStart}~${gFirst.currentEnd} (日給:${curW}円)`,
       "↓",
-      `ご相談) 【${e.clinicName}】${e.consultStart}~${e.consultEnd}(日給:${conW}円${allowSuffix})`
+      ...consultLines
     ].join("\n");
   }).join("\n\n");
 
@@ -288,7 +323,7 @@ function buildMultiDateTemplate_(entries) {
     "平素よりお世話になっております。",
     `ドクターサポート事務局の${staffLabel}でございます。`,
     "",
-    `ご勤務のご相談が重なり恐縮ですが、${dateLabels}のご勤務につきましてご相談でございます。`,
+    `ご勤務のご相談が重なり恐縮ですが、${uniqueDateLabels}のご勤務につきましてご相談でございます。`,
     routeSentence,
     "",
     blocks,
@@ -310,7 +345,8 @@ function buildMessageTemplate_(params) {
     absenceStart, absenceEnd, currentStart, currentEnd,
     consultStart, consultEnd, consultNoteSuffix, diffHoursText,
     isMorningToNightExt, consultPm1DailyWage,
-    currentDailyWage, consultDailyWage, hasRequestAllow, isPublicRecruit
+    currentDailyWage, consultDailyWage, hasRequestAllow, isPublicRecruit,
+    multiTargets
   } = params;
 
   const docHonorific = `${doctorName || "{医師名}"}先生`;
@@ -351,12 +387,23 @@ function buildMessageTemplate_(params) {
 
     let consultPhrase = "ご勤務いただくことは可能でしょうか。";
     let hasCurrentRow = false;
+    let curLabelForFullTime = curClinicDisp;
+    let targetStartForFullTime = consultStart || absenceStart;
+    let targetEndForFullTime = consultEnd || absenceEnd;
+
     if (approachType === "延長相談") {
       consultPhrase = `ご勤務時間を${diffHoursText}延長していただくことは可能でしょうか。`;
       hasCurrentRow = true;
     } else if (approachType === "早出相談") {
       consultPhrase = `ご勤務時間を${diffHoursText}前倒ししていただくことは可能でしょうか。`;
       hasCurrentRow = true;
+    } else if (approachType === "勤務地変更相談") {
+      consultPhrase = `ご勤務拠点を 【${fromClinicName}】 より 【${clinicName}】 へご変更いただくことは可能でしょうか。`;
+      hasCurrentRow = true;
+      curLabelForFullTime = fromClinicName;
+    } else {
+      targetStartForFullTime = absenceStart;
+      targetEndForFullTime = absenceEnd;
     }
 
     const lines = [
@@ -370,8 +417,8 @@ function buildMessageTemplate_(params) {
       "",
       `・${ymdDay}`
     ];
-    if (hasCurrentRow) lines.push(`現在)【${curClinicDisp}】${currentStart}~${currentEnd}`);
-    lines.push(`ご相談) 【${clinicName}】${consultStart}~${consultEnd}${noteSuffix}`);
+    if (hasCurrentRow) lines.push(`現在)【${curLabelForFullTime}】${currentStart}~${currentEnd}`);
+    lines.push(`ご相談) 【${clinicName}】${targetStartForFullTime}~${targetEndForFullTime}${noteSuffix}`);
     lines.push("");
     lines.push("急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。");
     lines.push("お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。");
@@ -478,6 +525,38 @@ function buildMessageTemplate_(params) {
     }
 
     const allowSuffix = hasRequestAllow ? "+依頼手当10,000円" : "";
+
+    // 単一行で複数候補拠点（multiTargets）が渡された場合の並記出力
+    if (Array.isArray(multiTargets) && multiTargets.length > 1) {
+      const toNames = multiTargets.map(t => `【${t.clinicName}】`).join(" または ");
+      const consultLines = multiTargets.map((t, idx) => {
+        const cW = formatComma_(t.consultDailyWage);
+        const aSuf = t.hasRequestAllow ? "+依頼手当10,000円" : allowSuffix;
+        return `ご相談${getCircledNumber_(idx + 1)}) 【${t.clinicName}】${t.consultStart || consultStart}~${t.consultEnd || consultEnd}(日給:${cW}円${aSuf})`;
+      });
+      return [
+        docHonorific,
+        "平素よりお世話になっております。",
+        `ドクターサポート事務局の${staffLabel}でございます。`,
+        "",
+        `ご勤務のご相談が重なり恐縮ですが、${tomorrowPrefix}${mdDay}のご勤務につきましてご相談でございます。`,
+        `当日のご勤務拠点を 【${fromClinicName}】 より ${toNames} へご変更いただくことは可能でしょうか。`,
+        "",
+        `■${mdDay}`,
+        `現在)【${fromClinicName}】 ${currentStart}~${currentEnd} (日給:${curWageStr}円)`,
+        "↓",
+        ...consultLines,
+        "",
+        "※上記募集は公開中のため、ご応募いただいた際に充足している可能性もございます。",
+        "恐れ入りますが、充足の際はご容赦くださいませ。",
+        "",
+        "お忙しいところ、ご負担をおかけして恐縮ではございますが、ご検討いただけましたら幸いです。",
+        "何卒よろしくお願い申し上げます。",
+        "",
+        `ドクターサポート事務局\u3000${staffLabel}`
+      ].join("\n");
+    }
+
     return [
       docHonorific,
       "平素よりお世話になっております。",

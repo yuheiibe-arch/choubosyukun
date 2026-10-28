@@ -1,0 +1,371 @@
+<script>
+  /**
+   * 勤務地変更相談時に「第2・第3候補拠点」を追加選択できるUIを動的にマウントする
+   */
+  function ensureExtraTargetClinicsUI_() {
+    var clinicSel = document.getElementById("clinicSelect");
+    if (!clinicSel) return;
+
+    var container = document.getElementById("extraClinicsContainer");
+    if (!container) {
+      container = document.createElement("div");
+      container.id = "extraClinicsContainer";
+      container.style.marginTop = "6px";
+      container.style.padding = "6px 8px";
+      container.style.background = "#f8fafc";
+      container.style.border = "1px dashed #cbd5e1";
+      container.style.borderRadius = "6px";
+      container.style.fontSize = "12px";
+
+      var html = [
+        '<div style="font-weight:bold;color:#334155;margin-bottom:4px;">📍 複数拠点の同時打診（ご相談①・②並記用・任意）</div>',
+        '<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px;">',
+        '  <span style="min-width:52px;color:#475569;">第2候補:</span>',
+        '  <select id="extraClinic2Select" style="flex:1;padding:3px;" onchange="rebuildDraftPreview()"><option value="">（なし）</option></select>',
+        '  <label style="white-space:nowrap;cursor:pointer;"><input type="checkbox" id="extraClinic2SpCheck" onchange="rebuildDraftPreview()">特時</label>',
+        '</div>',
+        '<div style="display:flex;gap:6px;align-items:center;">',
+        '  <span style="min-width:52px;color:#475569;">第3候補:</span>',
+        '  <select id="extraClinic3Select" style="flex:1;padding:3px;" onchange="rebuildDraftPreview()"><option value="">（なし）</option></select>',
+        '  <label style="white-space:nowrap;cursor:pointer;"><input type="checkbox" id="extraClinic3SpCheck" onchange="rebuildDraftPreview()">特時</label>',
+        '</div>'
+      ].join("");
+      container.innerHTML = html;
+      clinicSel.parentNode.appendChild(container);
+
+      var fillOptions = function(selId) {
+        var sel = document.getElementById(selId);
+        if (!sel) return;
+        for (var i = 0; i < clinicSel.options.length; i++) {
+          var optVal = clinicSel.options[i].value;
+          var optTxt = clinicSel.options[i].text;
+          if (!optVal || optVal === "要確認") continue;
+          var o = document.createElement("option");
+          o.value = optVal;
+          o.text = optTxt;
+          sel.appendChild(o);
+        }
+      };
+      fillOptions("extraClinic2Select");
+      fillOptions("extraClinic3Select");
+    }
+
+    container.style.display = (STATE.approachType === "勤務地変更相談") ? "block" : "none";
+  }
+
+  function calcExtraTargetDailyWageJS_(extraClinicRaw, isExtraSpecial, dateStr, dept, fromClinic, conTime, absTime) {
+    var cleanExtra = stripClinicPrefix_(extraClinicRaw);
+    if (!cleanExtra) return null;
+    var info = getDayCategoryInfo_(dateStr);
+    var targetFound = getWageRowFromAllTables_(cleanExtra, dept, info.y, info.m);
+    if (!targetFound || !targetFound.row || !targetFound.row[info.dayCat]) return null;
+
+    var fromFound = getWageRowFromAllTables_(fromClinic, dept, info.y, info.m);
+    var fromRates = (fromFound && fromFound.row && fromFound.row[info.dayCat]) ? fromFound.row[info.dayCat] : null;
+    var targRates = targetFound.row[info.dayCat];
+
+    var spBonus = isExtraSpecial ? 2000 : 0;
+    var spRange = (absTime && absTime.indexOf("-") !== -1) ? absTime : conTime;
+    var yen = calcMoverIntervalYenJS_(conTime, fromRates, fromClinic === "北葛西", targRates, cleanExtra === "北葛西", spRange, spBonus);
+    var hasInt = clinicHasInternalMedicineJS_(cleanExtra);
+    var disp = hasInt ? (cleanExtra + " (" + dept + ")") : cleanExtra;
+    return { dispClinic: disp, dailyWage: yen };
+  }
+
+  function normalizeStaffSurnameJS_(rawStaff) {
+    var s = String(rawStaff || "").trim();
+    if (!s) return "";
+    var list = STATE.staffList || [];
+    if (list.indexOf(s) !== -1) return s;
+    for (var i = 0; i < list.length; i++) {
+      var st = String(list[i] || "").trim();
+      if (st && s.indexOf(st) === 0) return st;
+    }
+    return s.split(/[\s\u3000]+/)[0].trim();
+  }
+
+  function rebuildDraftPreview() {
+    var item = STATE.confirmItems[STATE.selectedIdx];
+    if (!item) return;
+
+    ensureExtraTargetClinicsUI_();
+
+    var dateStr = item.dateStr || "2026/10/25";
+    var p = dateStr.split("/");
+    var dObj = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+    var days = ["日", "月", "火", "水", "木", "金", "土"];
+    var mdDay = (dObj.getMonth() + 1) + "月" + dObj.getDate() + "日(" + days[dObj.getDay()] + ")";
+    var ymdDay = dObj.getFullYear() + "年" + mdDay;
+
+    var clinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
+    var dept = STATE.dept;
+    var hasInt = clinicHasInternalMedicineJS_(clinic);
+    var dispClinic = hasInt ? (clinic + " (" + dept + ")") : clinic;
+    var rawDocInput = (document.getElementById("doctorInput").value || "").trim();
+    var docName = rawDocInput || "{医師名}";
+    var staff = normalizeStaffSurnameJS_(document.getElementById("staffSelect").value) || "{担当者名}";
+    var rawAbs = document.getElementById("absenceTimeInput").value || "-";
+    var rawCur = document.getElementById("currentTimeInput").value || "-";
+    var rawCon = document.getElementById("consultTimeInput").value || rawCur || rawAbs;
+    var absTime = rawAbs.replace("-", "~");
+    var curTime = rawCur.replace("-", "~");
+    var conTime = rawCon.replace("-", "~");
+    var fromClinic = stripClinicPrefix_(document.getElementById("fromClinicInput").value) || "現在拠点";
+
+    var curWage = Number(document.getElementById("currentDailyWageInput").value || 0).toLocaleString();
+    var conWage = Number(document.getElementById("consultDailyWageInput").value || 0).toLocaleString();
+    var allow = Number(document.getElementById("allowanceInput").value || 0);
+    var allowSuffix = allow > 0 ? ("+依頼手当" + allow.toLocaleString() + "円") : "";
+
+    var lines = [];
+    var allTargetNamesForMemo = [dispClinic];
+
+    if (STATE.approachType === "勤務地変更相談") {
+      var targets = [{ dispClinic: dispClinic, wageStr: conWage }];
+
+      var ex2El = document.getElementById("extraClinic2Select");
+      var ex2Sp = document.getElementById("extraClinic2SpCheck");
+      if (ex2El && ex2El.value) {
+        var ex2Res = calcExtraTargetDailyWageJS_(ex2El.value, ex2Sp && ex2Sp.checked, dateStr, dept, fromClinic, rawCon, rawAbs);
+        if (ex2Res) {
+          targets.push({ dispClinic: ex2Res.dispClinic, wageStr: ex2Res.dailyWage.toLocaleString() });
+          allTargetNamesForMemo.push(ex2Res.dispClinic);
+        }
+      }
+
+      var ex3El = document.getElementById("extraClinic3Select");
+      var ex3Sp = document.getElementById("extraClinic3SpCheck");
+      if (ex3El && ex3El.value) {
+        var ex3Res = calcExtraTargetDailyWageJS_(ex3El.value, ex3Sp && ex3Sp.checked, dateStr, dept, fromClinic, rawCon, rawAbs);
+        if (ex3Res) {
+          targets.push({ dispClinic: ex3Res.dispClinic, wageStr: ex3Res.dailyWage.toLocaleString() });
+          allTargetNamesForMemo.push(ex3Res.dispClinic);
+        }
+      }
+
+      var toHeaderStr = targets.map(function(t) { return "【" + t.dispClinic + "】"; }).join(" または ");
+      var circledNums = ["①", "②", "③", "④"];
+      var consultLines = targets.map(function(t, idx) {
+        var prefix = targets.length > 1 ? ("ご相談" + circledNums[idx] + ")") : "ご相談)";
+        return prefix + " 【" + t.dispClinic + "】" + conTime + "(日給:" + t.wageStr + "円" + allowSuffix + ")";
+      });
+
+      lines = [
+        docName + "先生",
+        "平素よりお世話になっております。",
+        "ドクターサポート事務局の" + staff + "でございます。",
+        "",
+        "ご勤務のご相談が重なり恐縮ですが、" + mdDay + "のご勤務につきましてご相談でございます。",
+        "当日のご勤務拠点を 【" + fromClinic + "】 より " + toHeaderStr + " へご変更いただくことは可能でしょうか。",
+        "",
+        "■" + mdDay,
+        "現在)【" + fromClinic + "】 " + curTime + " (日給:" + curWage + "円)",
+        "↓"
+      ].concat(consultLines).concat([
+        "",
+        "※上記募集は公開中のため、ご応募いただいた際に充足している可能性もございます。",
+        "恐れ入りますが、充足の際はご容赦くださいませ。",
+        "",
+        "お忙しいところ、ご負担をおかけして恐縮ではございますが、ご検討いただけましたら幸いです。",
+        "何卒よろしくお願い申し上げます。",
+        "",
+        "ドクターサポート事務局\u3000" + staff
+      ]);
+    } else if (STATE.approachType === "延長相談" || STATE.approachType === "早出相談") {
+      var actionWord = STATE.approachType === "延長相談" ? "延長" : "前倒し";
+      lines = [
+        docName + "先生",
+        "平素よりお世話になっております。",
+        "ドクターサポート事務局の" + staff + "でございます。",
+        "",
+        "この度は、" + mdDay + "のご勤務につきましてご相談がありご連絡させていただきました。",
+        "現在、【" + dispClinic + "】" + absTime + "の時間帯に医師不在となる可能性があるため、",
+        "大変恐縮ではございますがもし先生のご都合がよろしければ、ご勤務時間を" + actionWord + "していただくことは可能でしょうか。",
+        "",
+        "・" + ymdDay,
+        "現在)【" + dispClinic + "】" + curTime,
+        "日給:" + curWage + "円",
+        "ご相談) 【" + dispClinic + "】" + conTime,
+        "日給:" + conWage + "円",
+        "",
+        "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
+        "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
+        "",
+        "ドクターサポート事務局\u3000" + staff
+      ];
+    } else {
+      lines = [
+        docName + "先生",
+        "平素よりお世話になっております。",
+        "ドクターサポート事務局の" + staff + "でございます。",
+        "",
+        "この度は、" + mdDay + "のご勤務につきましてご相談がありご連絡させていただきました。",
+        "現在、【" + dispClinic + "】" + absTime + "の時間帯に医師不在となる可能性があるため、",
+        "大変恐縮ではございますがもし先生のご都合がよろしければ、ご勤務いただくことは可能でしょうか。",
+        "",
+        "・" + ymdDay,
+        "ご相談) 【" + dispClinic + "】" + absTime,
+        "日給:" + conWage + "円",
+        "",
+        "※上記募集は公開中のため、ご応募いただいた際に充足している可能性もございます。",
+        "恐れ入りますが、充足の際はご容赦くださいませ。",
+        "",
+        "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
+        "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
+        "",
+        "ドクターサポート事務局\u3000" + staff
+      ];
+    }
+
+    document.getElementById("draftPreview").value = lines.join("\n");
+
+    var cleanDoc = docName === "{医師名}" ? "候補医師" : (docName + "先生");
+    var memo = cleanDoc + "に" + STATE.approachType + "交渉";
+    if (STATE.approachType === "勤務地変更相談") {
+      memo = cleanDoc + "に【" + fromClinic + "】から移動依頼交渉";
+      if (allTargetNamesForMemo.length > 1) {
+        memo += "（候補：" + allTargetNamesForMemo.join("・") + "）";
+      }
+    }
+    if (STATE.approachType === "延長相談") memo = cleanDoc + "に延長依頼交渉";
+    if (STATE.approachType === "早出相談") memo = cleanDoc + "に早出依頼交渉";
+    if (STATE.approachType === "個別アプローチ") {
+      memo = rawDocInput ? (cleanDoc + "に個別アプローチ交渉") : "候補医師抽出対象に個別アプローチ交渉（※移動時に候補を自動抽出）";
+    }
+    document.getElementById("memoPreview").value = memo;
+  }
+
+  function adjustRemainingSheetRowsAfterDelete_(deletedSheetRow) {
+    if (!deletedSheetRow) return;
+    STATE.confirmItems.forEach(function(it) {
+      if (it.sheetRow && it.sheetRow > deletedSheetRow) {
+        it.sheetRow = it.sheetRow - 1;
+      }
+    });
+  }
+
+  function commitCurrentItem() {
+    var item = STATE.confirmItems[STATE.selectedIdx];
+    if (!item) return;
+
+    var btn = document.getElementById("commitBtn");
+    var headerBadge = document.getElementById("headerStatus");
+    btn.disabled = true;
+
+    var clinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
+    var dept = STATE.dept;
+    var hasInt = clinicHasInternalMedicineJS_(clinic);
+    var dispClinic = hasInt ? (clinic + " (" + dept + ")") : clinic;
+    var fromClinic = stripClinicPrefix_(document.getElementById("fromClinicInput").value) || clinic;
+    var curTime = document.getElementById("currentTimeInput").value;
+    var conTime = document.getElementById("consultTimeInput").value || curTime || document.getElementById("absenceTimeInput").value;
+    var rawDocInput = (document.getElementById("doctorInput").value || "").trim();
+
+    var isIndividualAuto = (STATE.approachType === "個別アプローチ" && !rawDocInput);
+    var progressTimer = null;
+
+    if (isIndividualAuto) {
+      var steps = [
+        "🔍 1/3 勤務くん過去実績をスキャン中...",
+        "🔍 2/3 当日重複・除外・NG条件を照合中...",
+        "📝 3/3 候補医師をソートしてレビュー表へ挿入中..."
+      ];
+      var stepIdx = 0;
+      btn.innerText = steps[0];
+      headerBadge.innerText = "候補医師を自動抽出中...";
+      progressTimer = setInterval(function() {
+        stepIdx = (stepIdx + 1) % steps.length;
+        btn.innerText = steps[stepIdx];
+      }, 2000);
+    } else {
+      btn.innerText = "⏳ レビュー表へ移動中...";
+      headerBadge.innerText = "レビュー表へ転送中...";
+    }
+
+    var payload = {
+      sheetRow: item.sheetRow,
+      dateStr: item.dateStr,
+      origRawClinicName: item.origRawClinicName || item.rawClinicName,
+      rawClinicName: item.rawClinicName,
+      clinicName: clinic,
+      dept: dept,
+      absenceTime: document.getElementById("absenceTimeInput").value,
+      approachType: STATE.approachType,
+      doctorName: rawDocInput,
+      fromClinic: fromClinic,
+      currentShiftLabel: curTime ? (fromClinic + " " + curTime) : "-",
+      consultShiftLabel: dispClinic + " " + conTime,
+      isSpecial: document.getElementById("specialWageCheck").checked,
+      currentDailyWage: document.getElementById("currentDailyWageInput").value,
+      consultDailyWage: document.getElementById("consultDailyWageInput").value,
+      requestAllowance: document.getElementById("allowanceInput").value,
+      staffName: normalizeStaffSurnameJS_(document.getElementById("staffSelect").value),
+      draftMessage: document.getElementById("draftPreview").value,
+      evidence: item.evidence
+    };
+
+    var removedSheetRow = item.sheetRow;
+
+    google.script.run
+      .withSuccessHandler(function(res) {
+        if (progressTimer) clearInterval(progressTimer);
+        btn.disabled = false;
+        btn.innerText = "⭕ OK（文案・Slackレビューへ移す）";
+
+        // 第2・第3候補の選択状態をリセット
+        if (document.getElementById("extraClinic2Select")) document.getElementById("extraClinic2Select").value = "";
+        if (document.getElementById("extraClinic3Select")) document.getElementById("extraClinic3Select").value = "";
+
+        STATE.confirmItems.splice(STATE.selectedIdx, 1);
+        adjustRemainingSheetRowsAfterDelete_(removedSheetRow);
+
+        var doneNotice = (res && res.approachType === "個別アプローチ")
+          ? "✅ 候補" + (res.extractedCount || 0) + "名を抽出して" + (res.addedRowNum || "") + "行目へ挿入完了"
+          : "✅ レビュー表" + (res && res.addedRowNum ? (res.addedRowNum + "行目") : "") + "へ転送完了";
+
+        if (STATE.confirmItems.length > 0) {
+          headerBadge.innerText = doneNotice + " (残り" + STATE.confirmItems.length + "件)";
+          selectConfirmItem(Math.min(STATE.selectedIdx, STATE.confirmItems.length - 1));
+        } else {
+          headerBadge.innerText = "確認リストは0件です";
+          renderLeftList();
+          document.getElementById("evidenceBox").innerHTML =
+            "🎉 <b>すべての確認リスト項目を移動しました！</b><br>" + doneNotice + "<br>右上の「×」で閉じてください。";
+        }
+      })
+      .withFailureHandler(function(err) {
+        if (progressTimer) clearInterval(progressTimer);
+        btn.disabled = false;
+        btn.innerText = "⭕ OK（文案・Slackレビューへ移す）";
+        headerBadge.innerText = "エラー発生";
+        alert("移動エラー: " + err.message);
+      })
+      .commitShuseikunItemToReview(payload);
+  }
+
+  function discardCurrentItem() {
+    var item = STATE.confirmItems[STATE.selectedIdx];
+    if (!item) return;
+    if (!confirm("この行を確認リストから削除しますか？")) return;
+
+    var removedSheetRow = item.sheetRow;
+    document.getElementById("headerStatus").innerText = "🗑️ 削除中...";
+
+    google.script.run
+      .withSuccessHandler(function() {
+        STATE.confirmItems.splice(STATE.selectedIdx, 1);
+        adjustRemainingSheetRowsAfterDelete_(removedSheetRow);
+        document.getElementById("headerStatus").innerText = "残り " + STATE.confirmItems.length + "件";
+        if (STATE.confirmItems.length > 0) {
+          selectConfirmItem(Math.min(STATE.selectedIdx, STATE.confirmItems.length - 1));
+        } else {
+          renderLeftList();
+          document.getElementById("evidenceBox").innerText = "🎉 確認リストはすべて空になりました。右上の「×」で閉じてください。";
+        }
+      })
+      .withFailureHandler(function(err) {
+        alert("削除エラー: " + err.message);
+      })
+      .discardShuseikunConfirmItem(item);
+  }
+</script>

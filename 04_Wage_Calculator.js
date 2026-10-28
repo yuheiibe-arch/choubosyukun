@@ -184,8 +184,12 @@ function calculateWagesAndAllowance_(params) {
 
   const isSpecial = Boolean(isSpecialFromMtg || isSpecialFromD6);
 
+  // 勤務地変更時に相談開始・終了が未指定の場合は、現在シフト（まるごと移動）を引き継ぐ
+  const effConsultStart = consultStart || currentStart || (absenceTime ? absenceTime.split("-")[0] : "");
+  const effConsultEnd = consultEnd || currentEnd || (absenceTime ? absenceTime.split("-")[1] : "");
+
   const curEndMin = toMinutes_(currentEnd);
-  const conEndMin = toMinutes_(consultEnd);
+  const conEndMin = toMinutes_(effConsultEnd);
   const isMorningToNightExt =
     approachType === "延長相談" &&
     !isNaN(curEndMin) && curEndMin <= 13 * 60 + 30 &&
@@ -200,7 +204,7 @@ function calculateWagesAndAllowance_(params) {
       consultPm1DailyWage: 0,
       consultDailyWage: 0,
       requestAllowance: 0,
-      diffHoursText: calcDiffHoursText_(currentStart, currentEnd, consultStart, consultEnd),
+      diffHoursText: calcDiffHoursText_(currentStart, currentEnd, effConsultStart, effConsultEnd),
       sheetNameUsed: "常勤医師(時給合計0)",
       wageNote: "常勤のため日給表記なし"
     };
@@ -230,13 +234,15 @@ function calculateWagesAndAllowance_(params) {
     }
   }
 
+  const isFromKita = cleanWageClinicKey_(fromClinicName || clinicName) === "北葛西";
+  const isTargetKita = cleanWageClinicKey_(clinicName) === "北葛西";
+
   let currentDailyWage = 0;
   if (currentStart && currentEnd) {
     if (isCurrentVaccine) {
       const curMins = calcWorkingMinutesExcludeBreak_(currentStart, currentEnd);
       currentDailyWage = Math.round((curMins / 60) * VACCINE_DEDICATED_HOURLY_WAGE);
     } else {
-      const isFromKita = cleanWageClinicKey_(fromClinicName || clinicName) === "北葛西";
       currentDailyWage = calcIntervalWage_(
         currentStart, currentEnd, fromRates[dayCategory], isFromKita, null, 0
       );
@@ -244,9 +250,12 @@ function calculateWagesAndAllowance_(params) {
   }
 
   const specialBonus = isSpecial ? 2000 : 0;
+  const effectiveSpecialRange = (absenceTime && absenceTime.includes("-"))
+    ? absenceTime
+    : `${effConsultStart}-${effConsultEnd}`;
+
   let consultDailyWage = 0;
   let consultPm1DailyWage = 0;
-  const isTargetKita = cleanWageClinicKey_(clinicName) === "北葛西";
 
   if (approachType === "個別アプローチ" || approachType === "募集継続・ステイ") {
     const [absS, absE] = (absenceTime || "-").split("-");
@@ -256,19 +265,20 @@ function calculateWagesAndAllowance_(params) {
       );
     }
   } else if (approachType === "勤務地変更相談") {
-    const baseMaxRates = isCurrentVaccine
-      ? {
-          am: Math.max(VACCINE_DEDICATED_HOURLY_WAGE, targetRates[dayCategory].am),
-          pm: Math.max(VACCINE_DEDICATED_HOURLY_WAGE, targetRates[dayCategory].pm),
-          night: Math.max(VACCINE_DEDICATED_HOURLY_WAGE, targetRates[dayCategory].night)
-        }
-      : {
-          am: Math.max(fromRates[dayCategory].am, targetRates[dayCategory].am),
-          pm: Math.max(fromRates[dayCategory].pm, targetRates[dayCategory].pm),
-          night: Math.max(fromRates[dayCategory].night, targetRates[dayCategory].night)
-        };
-    consultDailyWage = calcIntervalWage_(
-      consultStart, consultEnd, baseMaxRates, isTargetKita, absenceTime, specialBonus
+    // ★重要：「移動先の時給（特別時給対象枠なら+2,000円した後）」と「移動元の通常時給」を比較し、高い方を採用する
+    const fromRateObj = isCurrentVaccine
+      ? { am: VACCINE_DEDICATED_HOURLY_WAGE, pm: VACCINE_DEDICATED_HOURLY_WAGE, night: VACCINE_DEDICATED_HOURLY_WAGE }
+      : fromRates[dayCategory];
+
+    consultDailyWage = calcMoverConsultWage_(
+      effConsultStart,
+      effConsultEnd,
+      fromRateObj,
+      isFromKita,
+      targetRates[dayCategory],
+      isTargetKita,
+      effectiveSpecialRange,
+      specialBonus
     );
   } else if ((approachType === "延長相談" || approachType === "早出相談") && isCurrentVaccine && dept !== "ワクチン専任") {
     const [absS, absE] = (absenceTime || "-").split("-");
@@ -285,11 +295,11 @@ function calculateWagesAndAllowance_(params) {
     }
   } else {
     consultDailyWage = calcIntervalWage_(
-      consultStart, consultEnd, targetRates[dayCategory], isTargetKita, absenceTime, specialBonus
+      effConsultStart, effConsultEnd, targetRates[dayCategory], isTargetKita, effectiveSpecialRange, specialBonus
     );
     if (isMorningToNightExt) {
       consultPm1DailyWage = calcIntervalWage_(
-        consultStart, "18:00", targetRates[dayCategory], isTargetKita, absenceTime, specialBonus
+        effConsultStart, "18:00", targetRates[dayCategory], isTargetKita, effectiveSpecialRange, specialBonus
       );
     }
   }
@@ -307,7 +317,7 @@ function calculateWagesAndAllowance_(params) {
     consultPm1DailyWage,
     consultDailyWage,
     requestAllowance,
-    diffHoursText: calcDiffHoursText_(currentStart, currentEnd, consultStart, consultEnd),
+    diffHoursText: calcDiffHoursText_(currentStart, currentEnd, effConsultStart, effConsultEnd),
     sheetNameUsed,
     wageNote: `${dayCategory === "weekday" ? "平日" : dayCategory === "sat" ? "土曜" : "日祝"} / 特別時給:${isSpecial ? "あり(通常時給+2,000円/h)" : "なし"}${isCurrentVaccine ? " / 現在枠:ワクチン専任(13,000円/h)" : ""}`
   };
@@ -320,6 +330,50 @@ function getDayCategory_(dateStr, holidaySet) {
   if (dow === 0) return "sunHol";
   if (dow === 6) return "sat";
   return "weekday";
+}
+
+function getSlotHourlyRate_(tMin, rateObj, isKitaKasai) {
+  if (!rateObj) return 0;
+  if (isKitaKasai) {
+    if (tMin < 12 * 60 + 30) return Number(rateObj.am || 0);
+    if (tMin >= 14 * 60 && tMin < 18 * 60) return Number(rateObj.pm || 0);
+    if (tMin >= 18 * 60) return Number(rateObj.night || 0);
+    return Number(rateObj.am || 0);
+  }
+  if (tMin < 13 * 60) return Number(rateObj.am || 0);
+  if (tMin >= 15 * 60 && tMin < 18 * 60) return Number(rateObj.pm || 0);
+  if (tMin >= 18 * 60) return Number(rateObj.night || 0);
+  return Number(rateObj.am || 0);
+}
+
+/**
+ * 勤務地変更相談用：15分刻みで「移動元の現在時給」と「移動先の時給（特別時給枠は+2,000円込み）」を比較し、高い方で日給を算出する
+ */
+function calcMoverConsultWage_(startStr, endStr, fromRates, isFromKita, targetRates, isTargetKita, specialRangeStr, specialBonusPerHour) {
+  const startMin = toMinutes_(startStr);
+  const endMin = toMinutes_(endStr);
+  if (isNaN(startMin) || isNaN(endMin) || endMin <= startMin) return 0;
+
+  let spStart = -1, spEnd = -1;
+  if (specialRangeStr && specialRangeStr.includes("-") && specialBonusPerHour > 0) {
+    const [s, e] = specialRangeStr.split("-");
+    spStart = toMinutes_(s);
+    spEnd = toMinutes_(e);
+  }
+
+  let totalYen = 0;
+  for (let t = startMin; t < endMin; t += 15) {
+    if (t >= 13 * 60 && t < 15 * 60) continue;
+
+    const fromHourly = getSlotHourlyRate_(t, fromRates, isFromKita);
+    const targetBaseHourly = getSlotHourlyRate_(t, targetRates, isTargetKita);
+    const bonus = (spStart !== -1 && t >= spStart && t < spEnd) ? specialBonusPerHour : 0;
+    const targetEffectiveHourly = targetBaseHourly + bonus;
+
+    const appliedHourly = Math.max(fromHourly, targetEffectiveHourly);
+    totalYen += appliedHourly * 0.25;
+  }
+  return Math.round(totalYen);
 }
 
 function calcIntervalWage_(startStr, endStr, rates, isKitaKasai, specialRangeStr, specialBonusPerHour) {
@@ -338,21 +392,8 @@ function calcIntervalWage_(startStr, endStr, rates, isKitaKasai, specialRangeStr
   for (let t = startMin; t < endMin; t += 15) {
     if (t >= 13 * 60 && t < 15 * 60) continue;
 
-    let baseHourly = rates.am;
-    if (isKitaKasai) {
-      if (t < 12 * 60 + 30) baseHourly = rates.am;
-      else if (t >= 14 * 60 && t < 18 * 60) baseHourly = rates.pm;
-      else if (t >= 18 * 60) baseHourly = rates.night;
-    } else {
-      if (t < 13 * 60) baseHourly = rates.am;
-      else if (t >= 15 * 60 && t < 18 * 60) baseHourly = rates.pm;
-      else if (t >= 18 * 60) baseHourly = rates.night;
-    }
-
-    let bonus = 0;
-    if (spStart !== -1 && t >= spStart && t < spEnd) {
-      bonus = specialBonusPerHour;
-    }
+    const baseHourly = getSlotHourlyRate_(t, rates, isKitaKasai);
+    const bonus = (spStart !== -1 && t >= spStart && t < spEnd) ? specialBonusPerHour : 0;
     totalYen += (baseHourly + bonus) * 0.25;
   }
   return Math.round(totalYen);

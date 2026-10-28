@@ -13,6 +13,7 @@
     var preferred = [
       fiscalYear + halfLabel + "時給",
       y + halfLabel + "時給",
+      "関西拠点時給",
       fiscalYear + "時給",
       y + "時給"
     ];
@@ -101,7 +102,7 @@
     var isKita = (clinic === "北葛西");
     var absTime = document.getElementById("absenceTimeInput").value || "";
     var conTime = document.getElementById("consultTimeInput").value || absTime;
-    var checkRange = absTime.indexOf("-") !== -1 ? absTime : conTime;
+    var checkRange = (conTime && conTime.indexOf("-") !== -1) ? conTime : absTime;
 
     var hasAm = false, hasPm = false, hasNight = false;
     if (checkRange && checkRange.indexOf("-") !== -1) {
@@ -146,22 +147,43 @@
     }
 
     var normClinic = normalizeClinicKeyJS_(clinic);
-    var d6Hit = STATE.d6Data.find(function(d) {
+    var d6Matches = STATE.d6Data.filter(function(d) {
       var dBase = normalizeClinicKeyJS_(d.baseClinic);
       return d.dateStr === item.dateStr && (dBase === normClinic || dBase.indexOf(normClinic) === 0 || normClinic.indexOf(dBase) === 0) && d.dept === STATE.dept;
     });
-    if (d6Hit) {
-      if (d6Hit.absenceTime) {
+
+    if (d6Matches.length > 0) {
+      var d6Hit = d6Matches[0];
+      if (d6Hit.absenceTime && !document.getElementById("absenceTimeInput").value) {
         document.getElementById("absenceTimeInput").value = d6Hit.absenceTime;
-        if (!document.getElementById("currentTimeInput").value) {
-          document.getElementById("consultTimeInput").value = d6Hit.absenceTime;
-        }
       }
-      if (d6Hit.isSpecialWage) document.getElementById("specialWageCheck").checked = true;
+      if (STATE.approachType === "勤務地変更相談" && document.getElementById("currentTimeInput").value) {
+        // 勤務地変更相談時は特段の指定がない限り現在シフト（例:09:00-21:00）をまるごと移動として引き継ぐ
+        document.getElementById("consultTimeInput").value = document.getElementById("currentTimeInput").value;
+      } else if (d6Hit.absenceTime && !document.getElementById("currentTimeInput").value) {
+        document.getElementById("consultTimeInput").value = d6Hit.absenceTime;
+      }
+      if (d6Matches.some(function(m) { return m.isSpecialWage; })) {
+        document.getElementById("specialWageCheck").checked = true;
+      }
     }
 
     filterDoctorCandidates();
     recalcAll();
+  }
+
+  function getSlotRateJS_(tMin, rates, isKita) {
+    if (!rates) return 0;
+    if (isKita) {
+      if (tMin < 12 * 60 + 30) return Number(rates.am || 0);
+      if (tMin >= 14 * 60 && tMin < 18 * 60) return Number(rates.pm || 0);
+      if (tMin >= 18 * 60) return Number(rates.night || 0);
+      return Number(rates.am || 0);
+    }
+    if (tMin < 13 * 60) return Number(rates.am || 0);
+    if (tMin >= 15 * 60 && tMin < 18 * 60) return Number(rates.pm || 0);
+    if (tMin >= 18 * 60) return Number(rates.night || 0);
+    return Number(rates.am || 0);
   }
 
   function calcIntervalYen(rangeStr, rates, isKita, spRangeStr, spBonus) {
@@ -174,23 +196,49 @@
     if (spRangeStr && spRangeStr.indexOf("-") !== -1 && spBonus > 0) {
       var spP = spRangeStr.split("-");
       spS = toMin(spP[0]); spE = toMin(spP[1]);
+    } else if (spBonus > 0) {
+      spS = sMin; spE = eMin;
     }
 
     var total = 0;
     for (var t = sMin; t < eMin; t += 15) {
       if (t >= 13 * 60 && t < 15 * 60) continue;
-      var base = Number(rates.am || 0);
-      if (isKita) {
-        if (t < 12 * 60 + 30) base = Number(rates.am || 0);
-        else if (t >= 14 * 60 && t < 18 * 60) base = Number(rates.pm || 0);
-        else if (t >= 18 * 60) base = Number(rates.night || 0);
-      } else {
-        if (t < 13 * 60) base = Number(rates.am || 0);
-        else if (t >= 15 * 60 && t < 18 * 60) base = Number(rates.pm || 0);
-        else if (t >= 18 * 60) base = Number(rates.night || 0);
-      }
+      var base = getSlotRateJS_(t, rates, isKita);
       var bonus = (spS !== -1 && t >= spS && t < spE) ? spBonus : 0;
       total += (base + bonus) * 0.25;
+    }
+    return Math.round(total);
+  }
+
+  /**
+   * 勤務地変更相談（移動）専用の日給計算：
+   * 15分刻みで「移動元の通常時給」と「移動先の時給（特別時給枠なら+2,000円した後）」を比較し、高い方を採用する
+   */
+  function calcMoverIntervalYenJS_(rangeStr, originRates, isFromKita, targetRates, isTargetKita, spRangeStr, spBonus) {
+    if (!rangeStr || rangeStr.indexOf("-") === -1 || !targetRates) return 0;
+    var parts = rangeStr.split("-");
+    var sMin = toMin(parts[0]), eMin = toMin(parts[1]);
+    if (isNaN(sMin) || isNaN(eMin) || eMin <= sMin) return 0;
+
+    var spS = -1, spE = -1;
+    if (spRangeStr && spRangeStr.indexOf("-") !== -1 && spBonus > 0) {
+      var spP = spRangeStr.split("-");
+      spS = toMin(spP[0]); spE = toMin(spP[1]);
+    } else if (spBonus > 0) {
+      spS = sMin; spE = eMin;
+    }
+
+    var total = 0;
+    for (var t = sMin; t < eMin; t += 15) {
+      if (t >= 13 * 60 && t < 15 * 60) continue;
+
+      var origH = originRates ? getSlotRateJS_(t, originRates, isFromKita) : 0;
+      var targBaseH = getSlotRateJS_(t, targetRates, isTargetKita);
+      var bonus = (spS !== -1 && t >= spS && t < spE) ? spBonus : 0;
+      var targetEffectiveH = targBaseH + bonus;
+
+      var appliedH = Math.max(origH, targetEffectiveH);
+      total += appliedH * 0.25;
     }
     return Math.round(total);
   }
@@ -198,34 +246,36 @@
   function recalcAll() {
     var item = STATE.confirmItems[STATE.selectedIdx];
     if (!item) return;
+
+    if (typeof ensureExtraTargetClinicsUI_ === "function") {
+      ensureExtraTargetClinicsUI_();
+    }
+
+    // 勤務地変更相談で現在シフトがあり、相談時間が未設定（または単一コマのみ）なら現在シフト（まるごと移動）をセット
+    var curTimeVal = document.getElementById("currentTimeInput").value;
+    var conTimeEl = document.getElementById("consultTimeInput");
+    if (STATE.approachType === "勤務地変更相談" && curTimeVal && !conTimeEl.value) {
+      conTimeEl.value = curTimeVal;
+    }
+
     updateHourlyInputVisibility_();
 
     var dateStr = item.dateStr;
     var clinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
     var dept = STATE.dept;
-    var fromClinic = stripClinicPrefix_(document.getElementById("fromClinicInput").value) || clinic;
 
     var info = getDayCategoryInfo_(dateStr);
     var targetFound = getWageRowFromAllTables_(clinic, dept, info.y, info.m);
-    var fromFound = getWageRowFromAllTables_(fromClinic, dept, info.y, info.m) || targetFound;
 
     var hasInt = clinicHasInternalMedicineJS_(clinic);
     var clinicLabel = hasInt ? (clinic + "（" + dept + "）") : clinic;
 
     if (targetFound && targetFound.row && targetFound.row[info.dayCat]) {
       var r = targetFound.row[info.dayCat];
-      var useAm = r.am, usePm = r.pm, useNight = r.night;
-
-      if (STATE.approachType === "勤務地変更相談" && fromFound && fromFound.row && fromFound.row[info.dayCat]) {
-        var fr = fromFound.row[info.dayCat];
-        useAm = Math.max(fr.am, r.am);
-        usePm = Math.max(fr.pm, r.pm);
-        useNight = Math.max(fr.night, r.night);
-      }
-
-      document.getElementById("rateAmInput").value = useAm;
-      document.getElementById("ratePmInput").value = usePm;
-      document.getElementById("rateNightInput").value = useNight;
+      // 時給入力欄には移動先拠点の基本時給をセット（比較はcalcMoverIntervalYenJS_側で特時加算後に行う）
+      document.getElementById("rateAmInput").value = r.am;
+      document.getElementById("ratePmInput").value = r.pm;
+      document.getElementById("rateNightInput").value = r.night;
       document.getElementById("wageRuleBadge").innerText =
         "💰 時給設定 【" + clinicLabel + " / " + info.dayLabel + "（" + targetFound.sheetName + "）】";
     } else {
@@ -245,7 +295,7 @@
     var dept = STATE.dept;
     var absTime = document.getElementById("absenceTimeInput").value;
     var curTime = document.getElementById("currentTimeInput").value;
-    var conTime = document.getElementById("consultTimeInput").value || absTime;
+    var conTime = document.getElementById("consultTimeInput").value || curTime || absTime;
     var fromClinic = stripClinicPrefix_(document.getElementById("fromClinicInput").value) || clinic;
     var isSpecial = document.getElementById("specialWageCheck").checked;
     var spBonus = isSpecial ? 2000 : 0;
@@ -261,211 +311,24 @@
       ? fromFound.row[info.dayCat]
       : consultRates;
 
-    var curYen = curTime ? calcIntervalYen(curTime, fromRates, fromClinic === "北葛西", null, 0) : 0;
-    var conYen = calcIntervalYen(conTime, consultRates, clinic === "北葛西", absTime, spBonus);
+    var isFromKita = (fromClinic === "北葛西");
+    var isTargetKita = (clinic === "北葛西");
+    var spRange = (absTime && absTime.indexOf("-") !== -1) ? absTime : conTime;
+
+    var curYen = curTime ? calcIntervalYen(curTime, fromRates, isFromKita, null, 0) : 0;
+    var conYen = 0;
+
+    if (STATE.approachType === "勤務地変更相談") {
+      conYen = calcMoverIntervalYenJS_(conTime, fromRates, isFromKita, consultRates, isTargetKita, spRange, spBonus);
+    } else {
+      conYen = calcIntervalYen(conTime, consultRates, isTargetKita, spRange, spBonus);
+    }
 
     document.getElementById("currentDailyWageInput").value = curYen;
     document.getElementById("consultDailyWageInput").value = conYen;
 
-    rebuildDraftPreview();
-  }
-
-  function normalizeStaffSurnameJS_(rawStaff) {
-    var s = String(rawStaff || "").trim();
-    if (!s) return "";
-    var list = STATE.staffList || [];
-    if (list.indexOf(s) !== -1) return s;
-    for (var i = 0; i < list.length; i++) {
-      var st = String(list[i] || "").trim();
-      if (st && s.indexOf(st) === 0) return st;
+    if (typeof rebuildDraftPreview === "function") {
+      rebuildDraftPreview();
     }
-    return s.split(/[\s\u3000]+/)[0].trim();
-  }
-
-  function rebuildDraftPreview() {
-    var item = STATE.confirmItems[STATE.selectedIdx];
-    if (!item) return;
-
-    var dateStr = item.dateStr || "2026/10/25";
-    var p = dateStr.split("/");
-    var dObj = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
-    var days = ["日", "月", "火", "水", "木", "金", "土"];
-    var mdDay = (dObj.getMonth() + 1) + "月" + dObj.getDate() + "日(" + days[dObj.getDay()] + ")";
-    var ymdDay = dObj.getFullYear() + "年" + mdDay;
-
-    var clinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
-    var dept = STATE.dept;
-    var hasInt = clinicHasInternalMedicineJS_(clinic);
-    var dispClinic = hasInt ? (clinic + " (" + dept + ")") : clinic;
-    var rawDocInput = (document.getElementById("doctorInput").value || "").trim();
-    var docName = rawDocInput || "{医師名}";
-    var staff = normalizeStaffSurnameJS_(document.getElementById("staffSelect").value) || "{担当者名}";
-    var absTime = (document.getElementById("absenceTimeInput").value || "-").replace("-", "~");
-    var curTime = (document.getElementById("currentTimeInput").value || "-").replace("-", "~");
-    var conTime = (document.getElementById("consultTimeInput").value || absTime).replace("-", "~");
-    var fromClinic = stripClinicPrefix_(document.getElementById("fromClinicInput").value) || "現在拠点";
-
-    var curWage = Number(document.getElementById("currentDailyWageInput").value || 0).toLocaleString();
-    var conWage = Number(document.getElementById("consultDailyWageInput").value || 0).toLocaleString();
-    var allow = Number(document.getElementById("allowanceInput").value || 0);
-    var allowSuffix = allow > 0 ? ("+依頼手当" + allow.toLocaleString() + "円") : "";
-
-    var lines = [];
-    if (STATE.approachType === "勤務地変更相談") {
-      lines = [
-        docName + "先生",
-        "平素よりお世話になっております。",
-        "ドクターサポート事務局の" + staff + "でございます。",
-        "",
-        "ご勤務のご相談が重なり恐縮ですが、" + mdDay + "のご勤務につきましてご相談でございます。",
-        "当日のご勤務拠点を 【" + fromClinic + "】 より 【" + dispClinic + "】 へご変更いただくことは可能でしょうか。",
-        "",
-        "■" + mdDay,
-        "現在)【" + fromClinic + "】 " + curTime + " (日給:" + curWage + "円)",
-        "↓",
-        "ご相談) 【" + dispClinic + "】" + conTime + "(日給:" + conWage + "円" + allowSuffix + ")",
-        "",
-        "※上記募集は公開中のため、ご応募いただいた際に充足している可能性もございます。",
-        "恐れ入りますが、充足の際はご容赦くださいませ。",
-        "",
-        "お忙しいところ、ご負担をおかけして恐縮ではございますが、ご検討いただけましたら幸いです。",
-        "何卒よろしくお願い申し上げます。",
-        "",
-        "ドクターサポート事務局\u3000" + staff
-      ];
-    } else if (STATE.approachType === "延長相談" || STATE.approachType === "早出相談") {
-      var actionWord = STATE.approachType === "延長相談" ? "延長" : "前倒し";
-      lines = [
-        docName + "先生",
-        "平素よりお世話になっております。",
-        "ドクターサポート事務局の" + staff + "でございます。",
-        "",
-        "この度は、" + mdDay + "のご勤務につきましてご相談がありご連絡させていただきました。",
-        "現在、【" + dispClinic + "】" + absTime + "の時間帯に医師不在となる可能性があるため、",
-        "大変恐縮ではございますがもし先生のご都合がよろしければ、ご勤務時間を" + actionWord + "していただくことは可能でしょうか。",
-        "",
-        "・" + ymdDay,
-        "現在)【" + dispClinic + "】" + curTime,
-        "日給:" + curWage + "円",
-        "ご相談) 【" + dispClinic + "】" + conTime,
-        "日給:" + conWage + "円",
-        "",
-        "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
-        "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
-        "",
-        "ドクターサポート事務局\u3000" + staff
-      ];
-    } else {
-      lines = [
-        docName + "先生",
-        "平素よりお世話になっております。",
-        "ドクターサポート事務局の" + staff + "でございます。",
-        "",
-        "この度は、" + mdDay + "のご勤務につきましてご相談がありご連絡させていただきました。",
-        "現在、【" + dispClinic + "】" + absTime + "の時間帯に医師不在となる可能性があるため、",
-        "大変恐縮ではございますがもし先生のご都合がよろしければ、ご勤務いただくことは可能でしょうか。",
-        "",
-        "・" + ymdDay,
-        "ご相談) 【" + dispClinic + "】" + absTime,
-        "日給:" + conWage + "円",
-        "",
-        "※上記募集は公開中のため、ご応募いただいた際に充足している可能性もございます。",
-        "恐れ入りますが、充足の際はご容赦くださいませ。",
-        "",
-        "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
-        "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
-        "",
-        "ドクターサポート事務局\u3000" + staff
-      ];
-    }
-
-    document.getElementById("draftPreview").value = lines.join("\n");
-
-    var cleanDoc = docName === "{医師名}" ? "候補医師" : (docName + "先生");
-    var memo = cleanDoc + "に" + STATE.approachType + "交渉";
-    if (STATE.approachType === "勤務地変更相談") memo = cleanDoc + "に【" + fromClinic + "】から移動依頼交渉";
-    if (STATE.approachType === "延長相談") memo = cleanDoc + "に延長依頼交渉";
-    if (STATE.approachType === "早出相談") memo = cleanDoc + "に早出依頼交渉";
-    if (STATE.approachType === "個別アプローチ") {
-      memo = rawDocInput ? (cleanDoc + "に個別アプローチ交渉") : "候補医師抽出対象に個別アプローチ交渉（※移動時に候補を自動抽出）";
-    }
-    document.getElementById("memoPreview").value = memo;
-  }
-
-  function commitCurrentItem() {
-    var item = STATE.confirmItems[STATE.selectedIdx];
-    if (!item) return;
-
-    var btn = document.getElementById("commitBtn");
-    btn.disabled = true;
-    btn.innerText = "⏳ レビュー表へ移動中...";
-
-    var clinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
-    var dept = STATE.dept;
-    var hasInt = clinicHasInternalMedicineJS_(clinic);
-    var dispClinic = hasInt ? (clinic + " (" + dept + ")") : clinic;
-    var fromClinic = stripClinicPrefix_(document.getElementById("fromClinicInput").value) || clinic;
-    var curTime = document.getElementById("currentTimeInput").value;
-    var conTime = document.getElementById("consultTimeInput").value || document.getElementById("absenceTimeInput").value;
-
-    var payload = {
-      sheetRow: item.sheetRow,
-      dateStr: item.dateStr,
-      origRawClinicName: item.origRawClinicName || item.rawClinicName,
-      rawClinicName: item.rawClinicName,
-      clinicName: clinic,
-      dept: dept,
-      absenceTime: document.getElementById("absenceTimeInput").value,
-      approachType: STATE.approachType,
-      doctorName: document.getElementById("doctorInput").value,
-      fromClinic: fromClinic,
-      currentShiftLabel: curTime ? (fromClinic + " " + curTime) : "-",
-      consultShiftLabel: dispClinic + " " + conTime,
-      isSpecial: document.getElementById("specialWageCheck").checked,
-      currentDailyWage: document.getElementById("currentDailyWageInput").value,
-      consultDailyWage: document.getElementById("consultDailyWageInput").value,
-      requestAllowance: document.getElementById("allowanceInput").value,
-      staffName: normalizeStaffSurnameJS_(document.getElementById("staffSelect").value),
-      draftMessage: document.getElementById("draftPreview").value,
-      evidence: item.evidence
-    };
-
-    google.script.run
-      .withSuccessHandler(function() {
-        btn.disabled = false;
-        btn.innerText = "⭕ OK（文案・Slackレビューへ移す）";
-        STATE.confirmItems.splice(STATE.selectedIdx, 1);
-        document.getElementById("headerStatus").innerText = "残り " + STATE.confirmItems.length + "件";
-        if (STATE.confirmItems.length > 0) {
-          selectConfirmItem(Math.min(STATE.selectedIdx, STATE.confirmItems.length - 1));
-        } else {
-          renderLeftList();
-          document.getElementById("evidenceBox").innerText = "🎉 すべての確認リスト項目を移動しました！右上の「×」で閉じてください。";
-        }
-      })
-      .withFailureHandler(function(err) {
-        btn.disabled = false;
-        btn.innerText = "⭕ OK（文案・Slackレビューへ移す）";
-        alert("移動エラー: " + err.message);
-      })
-      .commitShuseikunItemToReview(payload);
-  }
-
-  function discardCurrentItem() {
-    var item = STATE.confirmItems[STATE.selectedIdx];
-    if (!item) return;
-    if (!confirm("この行を確認リストから削除しますか？")) return;
-
-    google.script.run
-      .withSuccessHandler(function() {
-        STATE.confirmItems.splice(STATE.selectedIdx, 1);
-        document.getElementById("headerStatus").innerText = "残り " + STATE.confirmItems.length + "件";
-        if (STATE.confirmItems.length > 0) {
-          selectConfirmItem(Math.min(STATE.selectedIdx, STATE.confirmItems.length - 1));
-        } else {
-          renderLeftList();
-        }
-      })
-      .discardShuseikunConfirmItem(item);
   }
 </script>
