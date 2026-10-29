@@ -90,24 +90,41 @@ function isPastCompletedReport_(evidenceText) {
   return /してもらいました|いただきました|埋まりました|充足しました|変更済み|移動済み|完了しました/.test(s);
 }
 
+/**
+ * 同一医師への複数枠の打診を1通の送信文案に統合する
+ * - 勤務地変更相談（複数日まとめ）
+ * - 個別アプローチ（単一の指名医師に対する複数日・複数枠の追加勤務相談）
+ */
 function consolidateMultiDateDoctorDrafts_(reviewRows, draftParamsByRowIdx) {
-  const doctorGroups = new Map();
+  const moverGroups = new Map();
+  const individualGroups = new Map();
 
   for (let i = 0; i < draftParamsByRowIdx.length; i++) {
     const p = draftParamsByRowIdx[i];
-    if (!p || !p.doctorName || p.doctorName === "{医師名}" || p.approachType !== "勤務地変更相談") continue;
+    if (!p || !p.doctorName || p.doctorName === "{医師名}" || p.doctorName.includes("\n")) continue;
     if (p.rowState !== "未レビュー") continue;
 
-    if (!doctorGroups.has(p.doctorName)) {
-      doctorGroups.set(p.doctorName, []);
-    }
-    const list = doctorGroups.get(p.doctorName);
-    if (!list.some(existing => existing.dateStr === p.dateStr && existing.clinicName === p.clinicName)) {
-      list.push(p);
+    if (p.approachType === "勤務地変更相談") {
+      if (!moverGroups.has(p.doctorName)) {
+        moverGroups.set(p.doctorName, []);
+      }
+      const list = moverGroups.get(p.doctorName);
+      if (!list.some(existing => existing.dateStr === p.dateStr && existing.clinicName === p.clinicName)) {
+        list.push(p);
+      }
+    } else if (p.approachType === "個別アプローチ") {
+      if (!individualGroups.has(p.doctorName)) {
+        individualGroups.set(p.doctorName, []);
+      }
+      const list = individualGroups.get(p.doctorName);
+      if (!list.some(existing => existing.dateStr === p.dateStr && existing.clinicName === p.clinicName && existing.absenceStart === p.absenceStart)) {
+        list.push(p);
+      }
     }
   }
 
-  for (const [docName, entries] of doctorGroups.entries()) {
+  // 1. 勤務地変更相談の複数日統合
+  for (const [docName, entries] of moverGroups.entries()) {
     if (entries.length < 2) continue;
 
     entries.sort((a, b) => a.dateStr.localeCompare(b.dateStr));
@@ -124,6 +141,62 @@ function consolidateMultiDateDoctorDrafts_(reviewRows, draftParamsByRowIdx) {
       reviewRows[subIdx][16] = "【※" + primarySheetRow + "行目の" + docName + "先生の送信文案に複数日分（" + allDatesLabel + "）を1通に統合済み】";
     }
   }
+
+  // 2. 個別アプローチ（おまとめ打診・複数日追加勤務打診）の1通統合
+  for (const [docName, entries] of individualGroups.entries()) {
+    if (entries.length < 2) continue;
+
+    entries.sort((a, b) => a.dateStr.localeCompare(b.dateStr) || String(a.absenceStart || "").localeCompare(String(b.absenceStart || "")));
+    const combinedDraft = buildMultiDateIndividualTemplate_(entries);
+
+    const primaryEntry = entries[0];
+    const primarySheetRow = primaryEntry.rowIndex + 2;
+    const allDatesLabel = entries.map(e => e.dateStr.slice(5) + "(" + e.clinicName + ")").join(", ");
+
+    reviewRows[primaryEntry.rowIndex][16] = combinedDraft;
+
+    for (let k = 1; k < entries.length; k++) {
+      const subIdx = entries[k].rowIndex;
+      reviewRows[subIdx][16] = "【※" + primarySheetRow + "行目の" + docName + "先生のおまとめ送信文案に複数枠分（" + allDatesLabel + "）を1通に統合済み】";
+    }
+  }
+}
+
+/**
+ * 同一医師への複数日の「個別アプローチ（追加勤務打診）」を1通にまとめるテンプレート生成関数
+ */
+function buildMultiDateIndividualTemplate_(entries) {
+  const first = entries[0];
+  const docName = String(first.doctorName || "{医師名}").replace(/先生$/g, "");
+  const staff = first.staffName || "{担当者名}";
+
+  const slotLines = entries.map(e => {
+    const ymdLabel = typeof formatYmdDay_ === "function" ? formatYmdDay_(e.dateObj) : e.dateStr;
+    const absRange = (e.absenceStart || "") + "~" + (e.absenceEnd || "");
+    const wageText = e.consultDailyWage ? " (日給:" + formatComma_(e.consultDailyWage) + "円)" : "";
+    return "・" + ymdLabel + " 【" + e.clinicName + "】" + absRange + wageText;
+  });
+
+  return [
+    docName + "先生",
+    "平素より大変お世話になっております。",
+    "ドクターサポート事務局の" + staff + "でございます。",
+    "",
+    "この度は、下記日程のご勤務につきましてご相談がありご連絡させていただきました。",
+    "現在、複数日程にて医師不在となる可能性がある枠がございますため、",
+    "大変恐縮ではございますが、もし先生のご都合がよろしければ、いずれかの日程でもご勤務いただくことは可能でしょうか。",
+    "",
+    "■ご相談日程",
+    ...slotLines,
+    "",
+    "※上記募集は公開中のため、ご応募いただいた際に充足している可能性もございます。",
+    "恐れ入りますが、充足の際はご容赦くださいませ。",
+    "",
+    "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
+    "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
+    "",
+    "ドクターサポート事務局\u3000" + staff
+  ].join("\n");
 }
 
 /**
