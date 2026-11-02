@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * 05_Slack_And_D6Post.gs
- * 了承行のD6「作業メモ」転記・Slack投稿（親スレッド自動検索＆返信）・完了通知・出力確認
+ * 了承行のD6「作業メモ」転記・Slack投稿（『文案・Slack投稿レビュー』『オフライン修正シート』両対応版）
  * ============================================================================
  */
 
@@ -31,7 +31,7 @@ function fetchSlackParentThreadMap_(token, channelId) {
             if (!map.has(key)) {
               map.set(key, m.ts);
             }
-                    }
+          }
         }
       });
     }
@@ -143,13 +143,23 @@ function postToSlackThread_(threadTitle, text, targetDate, parentThreadMap) {
 }
 
 /**
- * D7レビューシートの「確認済」チェック行を一括でD6転記・Slack投稿・履歴記録する
+ * 現在開いているシート（『オフライン修正シート』または『文案・Slack投稿レビュー』）の「確認済」チェック行を一括でD6転記・Slack投稿・履歴記録する
  */
 function executeApprovedRows() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const revSheet = ss.getSheetByName(SHEET_NAMES.D7_REVIEW);
+  const activeSheet = ss.getActiveSheet();
+  const activeName = activeSheet ? activeSheet.getName() : "";
+  const offlineSheetName = (typeof SHEET_NAMES !== "undefined" && SHEET_NAMES.D7_OFFLINE_REVIEW)
+    ? SHEET_NAMES.D7_OFFLINE_REVIEW
+    : "オフライン修正シート";
+
+  const revSheet = (activeName === offlineSheetName)
+    ? activeSheet
+    : ss.getSheetByName(SHEET_NAMES.D7_REVIEW);
+
   const histSheet = ss.getSheetByName(SHEET_NAMES.D7_HISTORY);
   const logSheet = ss.getSheetByName(SHEET_NAMES.D7_LOG);
+  if (!revSheet) return;
   const lastRow = revSheet.getLastRow();
   if (lastRow < 2) return;
 
@@ -170,13 +180,13 @@ function executeApprovedRows() {
 
   const ui = SpreadsheetApp.getUi();
   if (targetIndices.length === 0) {
-    ui.alert("「確認済」にチェックが入っている対象行がありません。");
+    ui.alert(`シート「${revSheet.getName()}」に「確認済」にチェックが入っている対象行がありません。`);
     return;
   }
 
   const confirmResponse = ui.alert(
-    "Slack投稿・転記の確認",
-    "医師への送信なども済みですか？\n投稿後、このスレッドは削除されます。",
+    `Slack投稿・転記の確認（対象シート：${revSheet.getName()}）`,
+    "医師への送信なども済みですか？\n投稿後、対象行はこのシートから削除されます。",
     ui.ButtonSet.OK_CANCEL
   );
   if (confirmResponse !== ui.Button.OK) {
@@ -275,8 +285,8 @@ function executeApprovedRows() {
 
       if (logSheet) {
         const actionLabel = matchedD6Rows.length > 0
-          ? "D6転記・Slack投稿完了"
-          : "Slack投稿完了(D6該当枠なし)";
+          ? `D6転記・Slack投稿完了(${revSheet.getName()})`
+          : `Slack投稿完了(D6該当枠なし/${revSheet.getName()})`;
         appendRowAndTrimBlank_(
           logSheet,
           [nowStr, actionLabel, postId, `${targetDate} ${targetClinic}${targetTime}`, 1, `${memoToAppend} (${staffName || userEmail})`],
@@ -316,9 +326,10 @@ function executeApprovedRows() {
 /**
  * 📢 データ取込完了時にChatwork（[toall] + [info]）とSlack（<!here> + コードブロック）へ通知を送る
  */
-function sendImportCompletionNotifications_() {
+function sendImportCompletionNotifications_(sheetNameOpt) {
   const todayStr = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd");
-  const bodyText = `${todayStr} 超募集くんデータ作成済み\nURL:${D7_REVIEW_SHEET_URL}`;
+  const targetLabel = sheetNameOpt ? `（${sheetNameOpt}）` : "";
+  const bodyText = `${todayStr} 超募集くんデータ作成済み${targetLabel}\nURL:${D7_REVIEW_SHEET_URL}`;
   const props = PropertiesService.getScriptProperties();
 
   const cwToken = props.getProperty("CHATWORK_API_KEY");
@@ -370,34 +381,40 @@ function sendImportCompletionNotifications_() {
 }
 
 /**
- * デバッグ・確認用：現在のD7レビューシート・確認リストの内容をログ出力する
+ * デバッグ・確認用：現在のD7レビューシート・オフライン修正シート・確認リストの内容をログ出力する
  */
 function inspectCurrentOutput() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const revSheet = ss.getSheetByName(SHEET_NAMES.D7_REVIEW);
+  const offlineSheet = ss.getSheetByName(SHEET_NAMES.D7_OFFLINE_REVIEW || "オフライン修正シート");
   const confSheet = ss.getSheetByName(SHEET_NAMES.D7_CONFIRM);
 
-  console.log("==================================================");
-  console.log("■ 1. 文案・Slack投稿レビュー（全件・全文出力）");
-  console.log("==================================================");
-  if (revSheet && revSheet.getLastRow() >= 2) {
-    const rows = revSheet.getRange(2, 1, revSheet.getLastRow() - 1, 24).getDisplayValues();
-    rows.forEach((r, idx) => {
-      if (!r[3] && !r[4]) return;
-      console.log(`\n--- [No.${idx + 1}] 状態:${r[1]} | 日付:${r[3]} | 拠点:${r[4]} | 不在:${r[5]} | 科:${r[6]} ---`);
-      console.log(`  種別: ${r[7]} | 医師: ${r[8].replace(/\n/g, "・")} | 現在シフト: ${r[9]} -> 相談シフト: ${r[10]}`);
-      console.log(`  時給区分: ${r[11]} | 現在日給: ${r[12]}円 | 相談日給: ${r[13]}円 | 依頼手当: ${r[14]}円 | 担当: ${r[15]}`);
-      console.log(`  作業メモ案: ${r[17]}`);
-      console.log(`  根拠: ${r[21].replace(/\n/g, " / ")}`);
-      if (r[16]) {
-        console.log(`  【送信文案】:\n${r[16]}`);
-      } else {
-        console.log(`  【送信文案】: (作成なし)`);
-      }
-    });
-  } else {
-    console.log("データがありません");
-  }
+  const dumpReviewType = (title, sh) => {
+    console.log("==================================================");
+    console.log(title);
+    console.log("==================================================");
+    if (sh && sh.getLastRow() >= 2) {
+      const rows = sh.getRange(2, 1, sh.getLastRow() - 1, 24).getDisplayValues();
+      rows.forEach((r, idx) => {
+        if (!r[3] && !r[4]) return;
+        console.log(`\n--- [No.${idx + 1}] 状態:${r[1]} | 日付:${r[3]} | 拠点:${r[4]} | 不在:${r[5]} | 科:${r[6]} ---`);
+        console.log(`  種別: ${r[7]} | 医師: ${r[8].replace(/\n/g, "・")} | 現在シフト: ${r[9]} -> 相談シフト: ${r[10]}`);
+        console.log(`  時給区分: ${r[11]} | 現在日給: ${r[12]}円 | 相談日給: ${r[13]}円 | 依頼手当: ${r[14]}円 | 担当: ${r[15]}`);
+        console.log(`  作業メモ案: ${r[17]}`);
+        console.log(`  根拠: ${r[21].replace(/\n/g, " / ")}`);
+        if (r[16]) {
+          console.log(`  【送信文案】:\n${r[16]}`);
+        } else {
+          console.log(`  【送信文案】: (作成なし)`);
+        }
+      });
+    } else {
+      console.log("データがありません");
+    }
+  };
+
+  dumpReviewType("■ 1-A. オフライン修正シート（全件・全文出力）", offlineSheet);
+  dumpReviewType("■ 1-B. 文案・Slack投稿レビュー（全件・全文出力）", revSheet);
 
   console.log("\n==================================================");
   console.log("■ 2. 確認リスト（全件出力）");

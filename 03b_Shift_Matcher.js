@@ -1,9 +1,7 @@
 /**
  * ============================================================================
  * 03b_Shift_Matcher.gs
- * D6（アプローチシート）・D3（貼付用シート）の読込 ＆ 当日シフト突合
- * - 移動相談時に発言内で「前倒し・早出・延長・通し」があれば15:00-21:00等へ自動拡大
- * - 個別アプローチ時の別医師（当日他拠点勤務医）への誤マッチ・時間汚染を防止
+ * D6（アプローチシート）・D3（貼付用シート）の読込 ＆ 当日シフト突合（医籍番号直結特定対応版）
  * ============================================================================
  */
 
@@ -203,9 +201,6 @@ function matchD6RowsSmart_(d6Data, dateStr, clinicName, dept, targetTime, isKita
   };
 }
 
-/**
- * MTG発言（evidence）の中に、移動対象の医師本人に対する「前倒し・早出・延長・通し」等の時間拡大依頼が含まれているか判定する
- */
 function hasTimeExpansionIntentForMover_(evidenceText, fromClinicName) {
   const ev = String(evidenceText || "");
   if (!ev) return false;
@@ -229,8 +224,13 @@ function hasTimeExpansionIntentForMover_(evidenceText, fromClinicName) {
   return false;
 }
 
-function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, dept, fromClinic, d6Row, d3Data, effectiveAbsenceTime, evidenceText) {
+/**
+ * 第11引数 licenseNo（医籍番号）に対応：
+ * 『編集くん 64』から医籍番号が渡された場合、D3シフトの docId で100%確実に一致検索する
+ */
+function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, dept, fromClinic, d6Row, d3Data, effectiveAbsenceTime, evidenceText, licenseNo) {
   const cleanTarget = (rawDocName || "").replace(/\s+/g, "");
+  const cleanLic = String(licenseNo || "").trim();
   const [absStart, absEnd] = (effectiveAbsenceTime || "-").split("-");
   let resolvedApproachType = approachType;
 
@@ -248,10 +248,10 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     }
   }
 
-  // ★個別アプローチ（新規打診）の場合：当日他拠点の別医師（例：奥山舞→青山舞）へ誤マッチさせず、不在時間そのまま（例：18:00-21:00）で打診する
+  // 1. 個別アプローチ（新規打診）の場合
   if (resolvedApproachType === "個別アプローチ") {
     const targetClinicDisp = d6Row ? d6Row.clinicRaw : (targetDept === "ワクチン専任" ? `${clinicName}(ワクチン専任)` : clinicName);
-    if (!cleanTarget) {
+    if (!cleanTarget && !cleanLic) {
       return {
         status: "OK",
         resolvedApproachType: "個別アプローチ",
@@ -265,7 +265,8 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     }
 
     const normTarget = toStandardKanji_(cleanTarget);
-    const exactDoc = d3Data.find(s => s.normName === normTarget) ||
+    const exactDoc = (cleanLic ? d3Data.find(s => s.docId === cleanLic) : null) ||
+                     d3Data.find(s => s.normName === normTarget) ||
                      d3Data.find(s => s.normLast === normTarget);
     const resolvedDocName = exactDoc ? exactDoc.docName : cleanTarget;
     const isFullTimeDoc = exactDoc ? exactDoc.isFullTime : false;
@@ -288,10 +289,11 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
       consultShiftLabel: `${targetClinicDisp} ${effectiveAbsenceTime}`,
       isFullTime: isFullTimeDoc,
       alreadyHasAllowance: false,
-      evidenceNote: exactDoc ? "個別アプローチ指名医師(D3マスタ一致)" : "個別アプローチ指名医師"
+      evidenceNote: cleanLic ? `個別アプローチ指名医師(医籍番号:${cleanLic})` : (exactDoc ? "個別アプローチ指名医師(D3マスタ一致)" : "個別アプローチ指名医師")
     };
   }
 
+  // 2. D6前後医師欄からの延長・早出特定
   if (d6Row && (resolvedApproachType === "延長相談" || resolvedApproachType === "早出相談")) {
     const sourceRaw = resolvedApproachType === "延長相談" ? d6Row.prevDocsRaw : d6Row.nextDocsRaw;
     const candidates = parseD6DoctorCell_(sourceRaw);
@@ -307,7 +309,8 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
           kanaName: "",
           lastKana: ""
         };
-        return { cand: c, score: calcDoctorSimilarityScore_(cleanTarget, fakeRecord) };
+        const licBonus = (cleanLic && d3Doc && d3Doc.docId === cleanLic) ? 50 : 0;
+        return { cand: c, score: calcDoctorSimilarityScore_(cleanTarget, fakeRecord) + licBonus };
       }).filter(x => x.score >= 55);
 
       scored.sort((a, b) => b.score - a.score);
@@ -320,11 +323,12 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
 
     if (matched.length === 1) {
       const m = matched[0];
-      const d3Doc = d3Data.find(s =>
-        s.dateStr === dateStr &&
-        toStandardKanji_(s.docName) === toStandardKanji_(m.name) &&
-        s.clinicName === clinicName
-      ) || d3Data.find(s => s.dateStr === dateStr && toStandardKanji_(s.docName) === toStandardKanji_(m.name));
+      const d3Doc = (cleanLic ? d3Data.find(s => s.dateStr === dateStr && s.docId === cleanLic) : null) ||
+        d3Data.find(s =>
+          s.dateStr === dateStr &&
+          toStandardKanji_(s.docName) === toStandardKanji_(m.name) &&
+          s.clinicName === clinicName
+        ) || d3Data.find(s => s.dateStr === dateStr && toStandardKanji_(s.docName) === toStandardKanji_(m.name));
 
       const actualStart = d3Doc ? d3Doc.startTime : m.start;
       const actualEnd = d3Doc ? d3Doc.endTime : m.end;
@@ -358,14 +362,22 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     }
   }
 
-  if (cleanTarget) {
+  // 3. 当日D3シフトからの検索（医籍番号があれば最優先で一致する当日シフトを取得）
+  if (cleanTarget || cleanLic) {
     const clinicHint = (resolvedApproachType === "延長相談" || resolvedApproachType === "早出相談") ? clinicName : fromClinic;
-    let sameDayDocs = findDoctorsByScoring_(d3Data, dateStr, cleanTarget, clinicHint, dept);
+    let sameDayDocs = [];
+
+    if (cleanLic) {
+      sameDayDocs = d3Data.filter(s => s.dateStr === dateStr && s.docId === cleanLic);
+    }
+    if (sameDayDocs.length === 0 && cleanTarget) {
+      sameDayDocs = findDoctorsByScoring_(d3Data, dateStr, cleanTarget, clinicHint, dept);
+    }
 
     const uniqueNames = Array.from(new Set(sameDayDocs.map(d => d.docName)));
 
     if (uniqueNames.length === 1) {
-      const s = sameDayDocs[0];
+      const s = (clinicHint ? sameDayDocs.find(d => d.clinicName.startsWith(clinicHint)) : null) || sameDayDocs[0];
       const isSameClinic = (s.clinicName === clinicName);
       const isOrigVaccine = s.dept.includes("ワクチン");
       const isTargetVaccine = (targetDept === "ワクチン専任");
@@ -423,7 +435,7 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
           : `${targetClinicDisp} ${cStart}-${cEnd}`,
         isFullTime: s.isFullTime,
         alreadyHasAllowance: s.alreadyHasAllowance,
-        evidenceNote: `D3自動スコアリング一致(${originLabel})`
+        evidenceNote: cleanLic ? `D3医籍番号一致(${cleanLic}/${originLabel})` : `D3自動スコアリング一致(${originLabel})`
       };
     } else if (uniqueNames.length > 1) {
       return {

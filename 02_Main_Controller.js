@@ -1,30 +1,66 @@
 /**
  * ============================================================================
  * 02_Main_Controller.gs
- * メイン実行エントリーポイント（修正くん起動メニュー・自然文作業メモ・自動通知＆トリガー対応版）
+ * メイン実行エントリーポイント（シンプル3行メニュー・自動振り分け・医籍番号直結照合対応版）
  * ============================================================================
  */
 
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("🤖 超募集くんAgent")
-    .addItem("① 最新の【Agent解析JSON】メールを取り込む", "importLatestJsonAndBuildReview")
-    .addItem("② 確認済の行をSlackへまとめて投稿", "executeApprovedRows")
-    .addItem("③ 修正くんを開く（確認リスト補正パネル）", "openShuseikunModal")
-    .addSeparator()
-    .addItem("⚙️ D7シート構造の初期化・祝日更新", "setupD7Workspace")
+    .addItem("📥 ① 最新データを取り込む", "importLatestJsonSmart")
+    .addItem("🚀 ② 確認済の行をSlackへ投稿", "executeApprovedRows")
+    .addItem("🕹️ ③ 修正くんを開く", "openShuseikunModal")
     .addToUi();
+}
+
+function importLatestJsonSmart() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const logSheet = ss.getSheetByName(SHEET_NAMES.D7_LOG);
+  const loggedIds = new Set();
+
+  if (logSheet && logSheet.getLastRow() >= 2) {
+    logSheet
+      .getRange(2, 3, logSheet.getLastRow() - 1, 1)
+      .getDisplayValues()
+      .forEach(function(r) {
+        const id = String(r[0] || "").trim();
+        if (id) loggedIds.add(id);
+      });
+  }
+
+  const offlineBatch = collectLatestJsonBatchFromGmail_(true);
+  const voiceBatch = collectLatestJsonBatchFromGmail_(false);
+
+  const hasNewOffline = Boolean(offlineBatch && offlineBatch.latestMsgId && !loggedIds.has(offlineBatch.latestMsgId));
+  const hasNewVoice = Boolean(voiceBatch && voiceBatch.latestMsgId && !loggedIds.has(voiceBatch.latestMsgId));
+
+  if (hasNewOffline || hasNewVoice) {
+    if (hasNewOffline) runJsonImportCore_(true);
+    if (hasNewVoice) runJsonImportCore_(false);
+    return;
+  }
+
+  const activeName = ss.getActiveSheet() ? ss.getActiveSheet().getName() : "";
+  const offlineSheetName = SHEET_NAMES.D7_OFFLINE_REVIEW || "オフライン修正シート";
+  if (activeName === offlineSheetName) {
+    runJsonImportCore_(true);
+  } else {
+    runJsonImportCore_(false);
+  }
 }
 
 function sortReviewRowsAndParamsByDate_(reviewRows, draftParamsByRowIdx) {
   if (!reviewRows || reviewRows.length <= 1) return;
 
-  const combined = reviewRows.map((row, idx) => ({
-    row,
-    param: draftParamsByRowIdx[idx] || null
-  }));
+  const combined = reviewRows.map(function(row, idx) {
+    return {
+      row: row,
+      param: draftParamsByRowIdx[idx] || null
+    };
+  });
 
-  combined.sort((a, b) => {
+  combined.sort(function(a, b) {
     const dA = normalizeDateStr_(a.row[3]);
     const dB = normalizeDateStr_(b.row[3]);
     if (dA !== dB) return dA.localeCompare(dB);
@@ -46,34 +82,79 @@ function sortReviewRowsAndParamsByDate_(reviewRows, draftParamsByRowIdx) {
 }
 
 function importLatestJsonAndBuildReview() {
+  return runJsonImportCore_(false);
+}
+
+function importOfflineDocJsonAndBuildSheet() {
+  return runJsonImportCore_(true);
+}
+
+function resolveExactDocNameByLicenseNo_(licenseNo, fallbackName, dateStr, d3Data) {
+  const lic = String(licenseNo || "").trim();
+  if (!lic) return fallbackName;
+
+  if (Array.isArray(d3Data)) {
+    const onDayHit = d3Data.find(function(s) {
+      return s.dateStr === dateStr && String(s.docId || "").trim() === lic;
+    });
+    if (onDayHit && onDayHit.docName) return onDayHit.docName;
+
+    const anyHit = d3Data.find(function(s) {
+      return String(s.docId || "").trim() === lic;
+    });
+    if (anyHit && anyHit.docName) return anyHit.docName;
+  }
+
+  if (typeof neg_fetchDoctorMasterData_ === "function") {
+    try {
+      const masterDocs = neg_fetchDoctorMasterData_();
+      const mHit = masterDocs.find(function(d) {
+        return String(d.licenseNo || "").trim() === lic;
+      });
+      if (mHit && mHit.fullName) return mHit.fullName.replace(/[\s\u3000]+/g, "");
+    } catch (e) {}
+  }
+
+  return fallbackName;
+}
+
+function runJsonImportCore_(isOfflineDocMode) {
   const d7Ss = SpreadsheetApp.getActiveSpreadsheet();
-  let revSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_REVIEW);
+  const offlineSheetName = SHEET_NAMES.D7_OFFLINE_REVIEW || "オフライン修正シート";
+  const targetReviewSheetName = isOfflineDocMode ? offlineSheetName : SHEET_NAMES.D7_REVIEW;
+  const headerColor = isOfflineDocMode ? "#0b8043" : "#1a73e8";
+
+  let revSheet = d7Ss.getSheetByName(targetReviewSheetName);
   let confSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_CONFIRM);
   let dictSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_DICT);
   let histSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_HISTORY);
   let logSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_LOG);
   const negSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_NEGOTIATION);
-  const excludedSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_EXCLUDED) || d7Ss.getSheets().find(s => s.getSheetId() === 1246480688);
+  const excludedSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_EXCLUDED) || d7Ss.getSheets().find(function(s) {
+    return s.getSheetId() === 1246480688;
+  });
 
-  if (!revSheet || !confSheet || !dictSheet || !histSheet) {
+  if (!confSheet || !dictSheet || !histSheet) {
     setupD7Workspace();
-    revSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_REVIEW);
     confSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_CONFIRM);
     dictSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_DICT);
     histSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_HISTORY);
     logSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_LOG);
   }
+  if (!revSheet) {
+    revSheet = ensureReviewStyleSheet_(d7Ss, targetReviewSheetName, headerColor);
+  }
 
   revSheet.getRange(1, 1).setValue("確認済");
 
-  const batchResult = collectLatestJsonBatchFromGmail_();
+  const batchResult = collectLatestJsonBatchFromGmail_(isOfflineDocMode);
   if (!batchResult || batchResult.items.length === 0) {
-    console.log("【Agent解析JSON】メールが見つからないか、JSON配列をパースできませんでした。");
+    console.log("対象メールが見つかりませんでした。");
     return;
   }
 
   const items = batchResult.items;
-  console.log(batchResult.msgCount + " 通のJSONメールから合計 " + items.length + " 件を読み込みました。外部シートと突合します...");
+  console.log(batchResult.msgCount + " 通のJSONメールから合計 " + items.length + " 件を読み込み、『" + targetReviewSheetName + "』へ展開します...");
 
   const unfilledSs = SpreadsheetApp.openById(EXTERNAL_IDS.D6_D3_UNFILLED_SS);
   const wageSs = SpreadsheetApp.openById(EXTERNAL_IDS.D4_D5_WAGE_SS);
@@ -103,7 +184,12 @@ function importLatestJsonAndBuildReview() {
     let targetTime = normalizeTimeRange_(item.target_time || "");
     let approachType = (item.approach_type || "").trim();
     let rawDocName = (item.target_doctor || "").replace(/先生$/g, "").trim();
+    const itemLicenseNo = String(item.license_no || "").trim();
     let rawAssignee = (item.assignee || "").trim();
+
+    if (itemLicenseNo) {
+      rawDocName = resolveExactDocNameByLicenseNo_(itemLicenseNo, rawDocName, dateStr, d3Data);
+    }
 
     if (dateStr && dateStr < baseDateYmd) {
       continue;
@@ -113,7 +199,7 @@ function importLatestJsonAndBuildReview() {
     }
 
     const staffFromDoc = resolveStaffByAlias_(rawDocName);
-    if (staffFromDoc) {
+    if (staffFromDoc && !itemLicenseNo) {
       rawAssignee = rawAssignee || staffFromDoc;
       rawDocName = "";
       if (!approachType || approachType === "要確認") {
@@ -154,7 +240,7 @@ function importLatestJsonAndBuildReview() {
     const docResolution = resolveDoctorAndShift_(
       rawDocName, approachType, dateStr, clinicName, dept,
       item.from_clinic || resolvedClinic.inferredFromClinic,
-      d6Row, d3Data, effectiveAbsenceTime, item.evidence
+      d6Row, d3Data, effectiveAbsenceTime, item.evidence, itemLicenseNo
     );
 
     approachType = docResolution.resolvedApproachType || approachType;
@@ -166,6 +252,10 @@ function importLatestJsonAndBuildReview() {
     let existingRowIdx = (mergeKey && doctorClinicRowMap.has(mergeKey)) ? doctorClinicRowMap.get(mergeKey) : -1;
 
     let combinedEvidence = String(item.evidence || "");
+    if (itemLicenseNo && !combinedEvidence.includes(itemLicenseNo)) {
+      combinedEvidence += " [医籍:" + itemLicenseNo + "]";
+    }
+
     if (existingRowIdx !== -1) {
       const prevEv = doctorClinicRowMap.get(mergeKey + "_EVIDENCE") || "";
       combinedEvidence = prevEv.includes(combinedEvidence) ? prevEv : prevEv + " / " + combinedEvidence;
@@ -173,8 +263,10 @@ function importLatestJsonAndBuildReview() {
       const prevAbsence = reviewRows[existingRowIdx][5];
       const isNarrowingNow = /とりあえず|まずは|一旦/.test(String(item.evidence || ""));
       if (!isNarrowingNow && hasTimeExpansionIntentForMover_(combinedEvidence, effectiveFromClinic)) {
-        const [pS, pE] = String(prevAbsence || "-").split("-");
-        const [cS, cE] = String(effectiveAbsenceTime || "-").split("-");
+        const prevParts = String(prevAbsence || "-").split("-");
+        const curParts = String(effectiveAbsenceTime || "-").split("-");
+        const pS = prevParts[0], pE = prevParts[1];
+        const cS = curParts[0], cE = curParts[1];
         const mergedS = (pS && cS) ? (toMinutes_(pS) <= toMinutes_(cS) ? pS : cS) : (pS || cS);
         const mergedE = (pE && cE) ? (toMinutes_(pE) >= toMinutes_(cE) ? pE : cE) : (pE || cE);
         if (mergedS && mergedE) {
@@ -190,7 +282,7 @@ function importLatestJsonAndBuildReview() {
 
       const reResolved = resolveDoctorAndShift_(
         rawDocName, approachType, dateStr, clinicName, dept,
-        effectiveFromClinic, d6Row, d3Data, effectiveAbsenceTime, combinedEvidence
+        effectiveFromClinic, d6Row, d3Data, effectiveAbsenceTime, combinedEvidence, itemLicenseNo
       );
       Object.assign(docResolution, reResolved);
       approachType = docResolution.resolvedApproachType || approachType;
@@ -221,23 +313,23 @@ function importLatestJsonAndBuildReview() {
     const isSpecialFromD6 = d6Row ? d6Row.isSpecialWage : false;
 
     const wageResult = calculateWagesAndAllowance_({
-      wageSs,
-      dateStr,
-      clinicName,
+      wageSs: wageSs,
+      dateStr: dateStr,
+      clinicName: clinicName,
       dept: (dept === "ワクチン専任" ? "小児科" : dept),
       fromClinicName: effectiveFromClinic,
-      approachType,
+      approachType: approachType,
       absenceTime: effectiveAbsenceTime,
       currentStart: docResolution.currentStart,
       currentEnd: docResolution.currentEnd,
       consultStart: docResolution.consultStart,
       consultEnd: docResolution.consultEnd,
       isCurrentVaccine: Boolean(docResolution.isCurrentVaccine),
-      isSpecialFromMtg,
-      isSpecialFromD6,
+      isSpecialFromMtg: isSpecialFromMtg,
+      isSpecialFromD6: isSpecialFromD6,
       isFullTime: docResolution.isFullTime,
       alreadyHasAllowance: docResolution.alreadyHasAllowance,
-      holidaySet
+      holidaySet: holidaySet
     });
 
     const reasons = [];
@@ -257,7 +349,7 @@ function importLatestJsonAndBuildReview() {
       reasons.push(wageResult.reason);
     }
 
-    if (reasons.length > 0) {
+    if (reasons.length > 0 && !isOfflineDocMode) {
       confirmRows.push([
         nowStr, dateStr, item.raw_clinic_name,
         resolvedClinic.candidatesText || clinicName,
@@ -270,6 +362,7 @@ function importLatestJsonAndBuildReview() {
     }
 
     const rowState = "未レビュー";
+    const warnNote = (isOfflineDocMode && reasons.length > 0) ? reasons.join(" / ") : "";
     const initialStaff = extractCleanStaffName_(
       resolveStaffByAlias_(rawAssignee) ||
       detectStaffInEvidence_(combinedEvidence) ||
@@ -281,15 +374,17 @@ function importLatestJsonAndBuildReview() {
     let draftParams = null;
     let draftMessage = "";
     if (finalDocName || approachType === "個別アプローチ") {
-      const [absStart, absEnd] = (effectiveAbsenceTime || "-").split("-");
+      const absParts = (effectiveAbsenceTime || "-").split("-");
+      const absStart = absParts[0];
+      const absEnd = absParts[1];
       draftParams = {
         rowIndex: targetRowIdx,
-        rowState,
-        dateStr,
+        rowState: rowState,
+        dateStr: dateStr,
         isFullTime: docResolution.isFullTime,
         doctorName: finalDocName || "{医師名}",
         staffName: initialStaff,
-        approachType,
+        approachType: approachType,
         shiftType: "確定",
         dateObj: parseDate_(dateStr),
         isTomorrow: isTomorrowDate_(dateStr),
@@ -306,9 +401,9 @@ function importLatestJsonAndBuildReview() {
         diffHoursText: wageResult.diffHoursText || "{時間}",
         isMorningToNightExt: Boolean(wageResult.isMorningToNightExt),
         consultPm1DailyWage: wageResult.consultPm1DailyWage || 0,
-        currentDailyWage: wageResult.currentDailyWage,
-        consultDailyWage: wageResult.consultDailyWage,
-        hasRequestAllow: wageResult.requestAllowance > 0,
+        currentDailyWage: wageResult.currentDailyWage || 0,
+        consultDailyWage: wageResult.consultDailyWage || 0,
+        hasRequestAllow: (wageResult.requestAllowance || 0) > 0,
         isPublicRecruit: true
       };
       draftMessage = buildMessageTemplate_(draftParams);
@@ -332,9 +427,9 @@ function importLatestJsonAndBuildReview() {
     ].filter(Boolean).join("\n");
 
     const rowData = [
-      false, rowState, "", dateStr, d6ClinicKey,
+      false, rowState, warnNote, dateStr, d6ClinicKey,
       effectiveAbsenceTime, dept, approachType, finalDocName,
-      docResolution.currentShiftLabel, docResolution.consultShiftLabel,
+      docResolution.currentShiftLabel || "-", docResolution.consultShiftLabel || (d6ClinicKey + " " + effectiveAbsenceTime),
       wageResult.isSpecial ? "特別時給" : "通常時給",
       wageResult.currentDailyWage || "", wageResult.consultDailyWage || "", wageResult.requestAllowance || "",
       initialStaff,
@@ -350,16 +445,15 @@ function importLatestJsonAndBuildReview() {
         doctorClinicRowMap.set(mergeKey, reviewRows.length);
         doctorClinicRowMap.set(mergeKey + "_EVIDENCE", combinedEvidence);
       }
-      // ★個別アプローチで医師名が未指定（!finalDocName）の場合のみ、候補医師10名を自動抽出してセットする（指名医師がいる場合は上書きしない）
       if (approachType === "個別アプローチ" && !finalDocName && clinicName && clinicName !== "要確認") {
         individualTargetRows.push({
           rowIndex: reviewRows.length,
-          dateStr,
-          clinicName,
+          dateStr: dateStr,
+          clinicName: clinicName,
           dept: (dept === "ワクチン専任" ? "小児科" : dept),
-          d6ClinicKey,
+          d6ClinicKey: d6ClinicKey,
           absenceTime: effectiveAbsenceTime,
-          d6Row
+          d6Row: d6Row
         });
       }
       reviewRows.push(rowData);
@@ -384,10 +478,6 @@ function importLatestJsonAndBuildReview() {
     if (reviewRows[r][16]) {
       reviewRows[r][16] = normalizeDraftMessageFormat_(reviewRows[r][16], cleanStaff);
     }
-  }
-
-  if (confirmRows.length > 1) {
-    confirmRows.sort((a, b) => normalizeDateStr_(a[1]).localeCompare(normalizeDateStr_(b[1])));
   }
 
   writeDataExactRows_(revSheet, reviewRows, 24);
@@ -417,33 +507,46 @@ function importLatestJsonAndBuildReview() {
   }
   applyLeftMiddleToSheet_(revSheet);
 
-  writeDataExactRows_(confSheet, confirmRows, 11);
-  applyLeftMiddleToSheet_(confSheet);
+  if (!isOfflineDocMode) {
+    if (confirmRows.length > 1) {
+      confirmRows.sort(function(a, b) {
+        return normalizeDateStr_(a[1]).localeCompare(normalizeDateStr_(b[1]));
+      });
+    }
+    writeDataExactRows_(confSheet, confirmRows, 11);
+    applyLeftMiddleToSheet_(confSheet);
+  }
 
-  appendRowAndTrimBlank_(logSheet, [nowStr, "JSON取込", batchResult.latestMsgId, batchResult.latestSubject, reviewRows.length, "確認リスト:" + confirmRows.length + "件"], 6);
+  const logTypeLabel = isOfflineDocMode ? "JSON取込(オフライン修正)" : "JSON取込(口頭MTG)";
+  appendRowAndTrimBlank_(logSheet, [nowStr, logTypeLabel, batchResult.latestMsgId, batchResult.latestSubject, reviewRows.length, "出力先:" + targetReviewSheetName], 6);
   applyLeftMiddleToSheet_(logSheet);
 
-  sendImportCompletionNotifications_();
+  sendImportCompletionNotifications_(targetReviewSheetName);
 }
 
 function autoImportTriggerHandler() {
-  const batchResult = collectLatestJsonBatchFromGmail_();
-  if (!batchResult || !batchResult.latestMsgId || batchResult.items.length === 0) {
-    return;
-  }
-
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const logSheet = ss.getSheetByName(SHEET_NAMES.D7_LOG);
+  const loggedIds = new Set();
+
   if (logSheet && logSheet.getLastRow() >= 2) {
-    const loggedIds = logSheet
+    logSheet
       .getRange(2, 3, logSheet.getLastRow() - 1, 1)
       .getDisplayValues()
-      .map(r => String(r[0] || "").trim());
-
-    if (loggedIds.includes(batchResult.latestMsgId)) {
-      return;
-    }
+      .forEach(function(r) {
+        const id = String(r[0] || "").trim();
+        if (id) loggedIds.add(id);
+      });
   }
 
-  importLatestJsonAndBuildReview();
+  const offlineBatch = collectLatestJsonBatchFromGmail_(true);
+  if (offlineBatch && offlineBatch.latestMsgId && offlineBatch.items.length > 0 && !loggedIds.has(offlineBatch.latestMsgId)) {
+    importOfflineDocJsonAndBuildSheet();
+    loggedIds.add(offlineBatch.latestMsgId);
+  }
+
+  const voiceBatch = collectLatestJsonBatchFromGmail_(false);
+  if (voiceBatch && voiceBatch.latestMsgId && voiceBatch.items.length > 0 && !loggedIds.has(voiceBatch.latestMsgId)) {
+    importLatestJsonAndBuildReview();
+  }
 }

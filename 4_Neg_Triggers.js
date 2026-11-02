@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * 4_Neg_Triggers.gs（または 06_Edit_Triggers.gs）
- * トリガー登録・onEditイベント制御（『交渉注意医師』＆『文案・Slack投稿レビュー』両対応）
+ * トリガー登録・onEditイベント制御（『交渉注意医師』『文案・Slack投稿レビュー』『オフライン修正シート』全対応）
  * ============================================================================
  */
 
@@ -19,9 +19,16 @@ function handleNegotiationSheetEdit(e) {
     if (startRow <= 1) return;
 
     // ========================================================================
-    // A. 『文案・Slack投稿レビュー』シートが編集された場合（超募集くん連動）
+    // A. 『文案・Slack投稿レビュー』または『オフライン修正シート』が編集された場合
     // ========================================================================
-    if (typeof SHEET_NAMES !== 'undefined' && sheetName === SHEET_NAMES.D7_REVIEW) {
+    const offlineSheetName = (typeof SHEET_NAMES !== 'undefined' && SHEET_NAMES.D7_OFFLINE_REVIEW)
+      ? SHEET_NAMES.D7_OFFLINE_REVIEW
+      : 'オフライン修正シート';
+    const isReviewTypeSheet =
+      (typeof SHEET_NAMES !== 'undefined' && sheetName === SHEET_NAMES.D7_REVIEW) ||
+      sheetName === offlineSheetName;
+
+    if (isReviewTypeSheet) {
       // 0. A列（1列目：確認済チェックボックス）ON/OFF ➔ 行グレーアウト＆D6作業メモ双方向同期
       if (startCol === 1) {
         const isChecked = (e.value === 'TRUE' || e.range.getValue() === true);
@@ -151,7 +158,7 @@ function applyDropdownsToExistingRows() {
 }
 
 /* =========================================================================
- * 『文案・Slack投稿レビュー』シート用の編集連動ヘルパー関数群
+ * 『文案・Slack投稿レビュー』＆『オフライン修正シート』用の編集連動ヘルパー関数群
  * ========================================================================= */
 
 function updateStaffNameInDraftCell_(sheet, row, newStaffRaw) {

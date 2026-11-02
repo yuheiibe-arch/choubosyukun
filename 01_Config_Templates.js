@@ -21,18 +21,19 @@ var MENTION_TARGET_HEADERS = ["シフト戦略チーム", "アルバイトスタ
 var VACCINE_DEDICATED_HOURLY_WAGE = 13000;
 
 var SHEET_NAMES = {
-  D6_APPROACH:    "アプローチシート",
-  D3_PASTED:      "貼付用",
-  D5_CLINICS:     "拠点名",
-  D7_REVIEW:      "文案・Slack投稿レビュー",
-  D7_CONFIRM:     "確認リスト",
-  D7_DICT:        "拠点名・誤変換辞書",
-  D7_STAFF:       "担当者",
-  D7_NEGOTIATION: "交渉注意医師",
-  D7_EXCLUDED:    "除外医師",
-  D7_HISTORY:     "打診履歴",
-  D7_HOLIDAY:     "祝日 (内閣府)",
-  D7_LOG:         "取込・投稿ログ"
+  D6_APPROACH:       "アプローチシート",
+  D3_PASTED:         "貼付用",
+  D5_CLINICS:        "拠点名",
+  D7_REVIEW:         "文案・Slack投稿レビュー",
+  D7_OFFLINE_REVIEW: "オフライン修正シート",
+  D7_CONFIRM:        "確認リスト",
+  D7_DICT:           "拠点名・誤変換辞書",
+  D7_STAFF:          "担当者",
+  D7_NEGOTIATION:    "交渉注意医師",
+  D7_EXCLUDED:       "除外医師",
+  D7_HISTORY:        "打診履歴",
+  D7_HOLIDAY:        "祝日 (内閣府)",
+  D7_LOG:            "取込・投稿ログ"
 };
 
 var CAO_HOLIDAY_CSV_URL = "https://" + "www8.cao.go.jp/chosei/shukujitsu/syukujitsu.csv";
@@ -207,7 +208,6 @@ function buildMultiDateTemplate_(entries) {
   const docHonorific = `${first.doctorName}先生`;
   const staffLabel = extractCleanStaffName_(first.staffName) || "{担当者名}";
 
-  // 日付ごとにグループ化（同日に複数拠点が提案されている場合は1つの日付ブロック内で ご相談①, ② として並記する）
   const dateGroupMap = new Map();
   for (const e of entries) {
     if (!dateGroupMap.has(e.dateStr)) {
@@ -526,7 +526,6 @@ function buildMessageTemplate_(params) {
 
     const allowSuffix = hasRequestAllow ? "+依頼手当10,000円" : "";
 
-    // 単一行で複数候補拠点（multiTargets）が渡された場合の並記出力
     if (Array.isArray(multiTargets) && multiTargets.length > 1) {
       const toNames = multiTargets.map(t => `【${t.clinicName}】`).join(" または ");
       const consultLines = multiTargets.map((t, idx) => {

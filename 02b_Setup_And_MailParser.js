@@ -1,28 +1,42 @@
 /**
  * ============================================================================
  * 02b_Setup_And_MailParser.gs
- * D7シート初期セットアップ・JSONメール収集＆パース・複数日まとめ統合・過去完了報告判定
+ * D7シート初期セットアップ（『オフライン修正シート』追加）・メール種別分離収集対応版
  * ============================================================================
  */
 
-function setupD7Workspace() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-
-  const reviewHeaders = [
+function getReviewHeadersCommon_() {
+  return [
     "確認済", "状態", "確認事項・候補", "日付", "拠点名(D6突合キー)",
     "不在時間(D6突合キー)", "診療科", "アプローチ種別", "対象医師名", "現在シフト(拠点・時間)",
     "相談シフト(拠点・時間)", "特別時給", "現在日給(円)", "相談日給(円)", "依頼手当(円)",
     "担当者", "送信文案（社内システム貼付用）", "作業メモ（D6転記内容）", "投稿先スレッド", "投稿種別",
     "Slack投稿本文", "根拠（参照シート・MTG発言）", "投稿ID・処理日時", "エラー内容"
   ];
-  const revSheet = ensureSheet_(ss, SHEET_NAMES.D7_REVIEW, reviewHeaders, "#1a73e8");
-  revSheet.setColumnWidth(9, 140);
-  revSheet.setColumnWidth(17, 360);
-  revSheet.setColumnWidth(18, 240);
-  revSheet.setColumnWidth(21, 300);
-  revSheet.setColumnWidth(22, 260);
-  trimBlankRowsAndCols_(revSheet, reviewHeaders.length);
-  applyLeftMiddleToSheet_(revSheet);
+}
+
+function ensureReviewStyleSheet_(ss, sheetName, headerColor) {
+  const reviewHeaders = getReviewHeadersCommon_();
+  const sh = ensureSheet_(ss, sheetName, reviewHeaders, headerColor || "#1a73e8");
+  sh.setColumnWidth(9, 140);
+  sh.setColumnWidth(17, 360);
+  sh.setColumnWidth(18, 240);
+  sh.setColumnWidth(21, 300);
+  sh.setColumnWidth(22, 260);
+  trimBlankRowsAndCols_(sh, reviewHeaders.length);
+  applyLeftMiddleToSheet_(sh);
+  return sh;
+}
+
+function setupD7Workspace() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // 1. 口頭会議用：『文案・Slack投稿レビュー』シート
+  ensureReviewStyleSheet_(ss, SHEET_NAMES.D7_REVIEW, "#1a73e8");
+
+  // 2. ドキュメント確定（編集くん64）用：『オフライン修正シート』
+  const offlineSheetName = SHEET_NAMES.D7_OFFLINE_REVIEW || "オフライン修正シート";
+  ensureReviewStyleSheet_(ss, offlineSheetName, "#0b8043");
 
   const confirmHeaders = [
     "取込日時", "日付", "文字起こし上の拠点名", "補正後の拠点名候補", "診療科判定",
@@ -61,7 +75,7 @@ function setupD7Workspace() {
   if (def && ss.getSheets().length > 1 && def.getLastRow() === 0) {
     ss.deleteSheet(def);
   }
-  console.log("「超募集くん（D7）」の初期セットアップ（『打診履歴』シート含む）が完了しました！");
+  console.log("「超募集くん（D7）」の初期セットアップ（『オフライン修正シート』『打診履歴』含む）が完了しました！");
 }
 
 function inferTimeFromCategory_(timeCategory, isKitaKasai) {
@@ -80,11 +94,12 @@ function inferTimeFromCategory_(timeCategory, isKitaKasai) {
 
 /**
  * 発言内容が「すでに完了した過去の調整の事後報告（移動してもらいました／埋まりました等）」のみであり、
- * 今後のアクション（しましょう／お願いしよう等）を含まない場合は true を返す
+ * 今後のアクションを含まない場合は true を返す（※ドキュメント確定分は常にスキップしない）
  */
 function isPastCompletedReport_(evidenceText) {
   const s = String(evidenceText || "").trim();
   if (!s) return false;
+  if (s.includes("ドキュメント確定") || s.includes("編集くんカスタム確定")) return false;
   const hasFutureIntent = /しましょう|ましょう|お願い|打診|聞いて|相談|調整し|いけるか|もらえるよう/.test(s);
   if (hasFutureIntent) return false;
   return /してもらいました|いただきました|埋まりました|充足しました|変更済み|移動済み|完了しました/.test(s);
@@ -92,8 +107,6 @@ function isPastCompletedReport_(evidenceText) {
 
 /**
  * 同一医師への複数枠の打診を1通の送信文案に統合する
- * - 勤務地変更相談（複数日まとめ）
- * - 個別アプローチ（単一の指名医師に対する複数日・複数枠の追加勤務相談）
  */
 function consolidateMultiDateDoctorDrafts_(reviewRows, draftParamsByRowIdx) {
   const moverGroups = new Map();
@@ -162,9 +175,6 @@ function consolidateMultiDateDoctorDrafts_(reviewRows, draftParamsByRowIdx) {
   }
 }
 
-/**
- * 同一医師への複数日の「個別アプローチ（追加勤務打診）」を1通にまとめるテンプレート生成関数
- */
 function buildMultiDateIndividualTemplate_(entries) {
   const first = entries[0];
   const docName = String(first.doctorName || "{医師名}").replace(/先生$/g, "");
@@ -201,16 +211,26 @@ function buildMultiDateIndividualTemplate_(entries) {
 
 /**
  * 分割送信された複数の【Agent解析JSON】メール（Part 1, Part 2...）をすべて収集・結合する
- * - 件名に [Part 1/2] が付いていても、付いていなくても（同件名で2通届いても）上書きせず全通を時系列順に統合する
- * - 空配列 [] や「文字起こしなし」のメールは無視する
+ * - isOfflineDocMode === true  : 「ドキュメント確定分」メールのみを収集（➔『オフライン修正シート』用）
+ * - isOfflineDocMode === false : 口頭会議の文字起こしメールのみを収集（➔『文案・Slack投稿レビュー』用）
  */
-function collectLatestJsonBatchFromGmail_() {
-  const threads = GmailApp.search('subject:"【Agent解析JSON"', 0, 5);
+function collectLatestJsonBatchFromGmail_(isOfflineDocMode) {
+  const searchQuery = isOfflineDocMode
+    ? 'subject:"【Agent解析JSON】ドキュメント確定分"'
+    : 'subject:"【Agent解析JSON"';
+
+  const threads = GmailApp.search(searchQuery, 0, 8);
   if (!threads || threads.length === 0) return null;
 
   const validMsgs = [];
   for (const th of threads) {
     for (const m of th.getMessages()) {
+      const subj = String(m.getSubject() || "");
+      const isDocConfirmMail = subj.includes("ドキュメント確定分");
+
+      if (isOfflineDocMode && !isDocConfirmMail) continue;
+      if (!isOfflineDocMode && isDocConfirmMail) continue;
+
       const rawBody = String(m.getPlainBody() || "").trim();
       if (!rawBody || rawBody === "[]" || rawBody.includes("文字起こしなし")) continue;
 
@@ -236,10 +256,8 @@ function collectLatestJsonBatchFromGmail_() {
   const latestTime = latestMsg.getDate().getTime();
   const latestMsgDateYmd = Utilities.formatDate(latestMsg.getDate(), "Asia/Tokyo", "yyyy/MM/dd");
 
-  // 最新の有効メールから前後20分以内に届いた全分割メールを対象にする
   const batchEntries = validMsgs.filter(e => Math.abs(latestTime - e.msg.getDate().getTime()) <= 20 * 60 * 1000);
 
-  // 同一本文の重複転送だけを除外し、Part 1（例:30件）と Part 2（例:8件）は両方とも残す
   const uniqueBatchEntries = [];
   const seenBodyHashes = new Set();
   for (const entry of batchEntries) {
@@ -259,7 +277,8 @@ function collectLatestJsonBatchFromGmail_() {
         item.raw_clinic_name || "",
         item.target_time || "",
         item.approach_type || "",
-        item.target_doctor || ""
+        item.target_doctor || "",
+        item.license_no || ""
       ].join("|");
 
       if (!seenItemKeys.has(dedupKey)) {
