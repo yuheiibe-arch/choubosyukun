@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * 03b_2_Shift_Matcher.gs
- * 当日シフト（D3・D6前後医師）突合メインロジック
+ * 当日シフト（D3・D6前後医師・バックアップ勤務依頼）突合メインロジック
  * ============================================================================
  */
 
@@ -19,6 +19,8 @@ function hasTimeExpansionIntentForMover_(evidenceText, fromClinicName) {
   }
 
   if (ev.includes("延長")) {
+    // ★「※残る野口優輔先生へ21:00まで延長打診を確認後に」は残存医の延長であり、移動医自身の時間拡大ではないため除外
+    if (/残る.*?延長/.test(ev)) return false;
     if (fromClinicName && (ev.includes(`${fromClinicName}延長`) || ev.includes(`${fromClinicName}は延長`) || ev.includes(`${fromClinicName}の延長`))) {
       return false;
     }
@@ -28,11 +30,6 @@ function hasTimeExpansionIntentForMover_(evidenceText, fromClinicName) {
   return false;
 }
 
-/**
- * 医師および当日シフトの特定メイン関数
- * 1) 個別アプローチは 03b_3_Individual_DocResolver.gs へ委譲
- * 2) 延長・早出・移動は当日D3シフト（およびD6前後医師欄）を第一候補として特定
- */
 function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, dept, fromClinic, d6Row, d3Data, effectiveAbsenceTime, evidenceText, licenseNo) {
   const cleanTarget = String(rawDocName || "").replace(/先生$/g, "").replace(/[\s ]+/g, "").trim();
   const cleanLic = String(licenseNo || "").trim();
@@ -53,6 +50,38 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     }
   }
 
+  // ★0. 「バックアップ勤務依頼」の場合：関東バックアップ待機医師への出動依頼として正常通過させる
+  if (resolvedApproachType === "バックアップ勤務依頼") {
+    const targetClinicDisp = d6Row ? d6Row.clinicRaw : clinicName;
+    const bkShift = d3Data.find(s =>
+      s.dateStr === dateStr &&
+      ((cleanLic && s.docId === cleanLic) || (cleanTarget && toStandardKanji_(s.docName) === toStandardKanji_(cleanTarget)))
+    );
+    const docDisp = bkShift ? bkShift.docName : (cleanTarget || "バックアップ医師");
+    const curStart = bkShift ? bkShift.startTime : (absStart || "09:00");
+    const curEnd = bkShift ? bkShift.endTime : (absEnd || "13:00");
+    return {
+      status: "OK",
+      resolvedApproachType: "勤務地変更相談",
+      resolvedDept: targetDept,
+      doctorName: docDisp,
+      fromClinic: "関東バックアップ",
+      isCurrentVaccine: false,
+      currentClinicLabel: "関東バックアップ",
+      currentStart: curStart,
+      currentEnd: curEnd,
+      consultStart: absStart || curStart,
+      consultEnd: absEnd || curEnd,
+      hasTimeExpansion: false,
+      consultNoteSuffix: "",
+      currentShiftLabel: `関東バックアップ ${curStart}-${curEnd}`,
+      consultShiftLabel: `${targetClinicDisp} ${absStart || curStart}-${absEnd || curEnd}`,
+      isFullTime: bkShift ? bkShift.isFullTime : false,
+      alreadyHasAllowance: true, // バックアップ医師は移動依頼手当(10,000円)対象外
+      evidenceNote: `バックアップ医師に勤務依頼(${docDisp})`
+    };
+  }
+
   // 1. 個別アプローチ（新規打診）の場合 -> 03b_3_Individual_DocResolver.gs で処理
   if (resolvedApproachType === "個別アプローチ") {
     return resolveIndividualApproachSlot_(
@@ -60,7 +89,7 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     );
   }
 
-  // 2. D6前後医師欄からの延長・早出特定（当日その拠点にいる前後枠の医師が第一候補）
+  // 2. D6前後医師欄からの延長・早出特定
   if (d6Row && (resolvedApproachType === "延長相談" || resolvedApproachType === "早出相談")) {
     const sourceRaw = resolvedApproachType === "延長相談" ? d6Row.prevDocsRaw : d6Row.nextDocsRaw;
     const candidates = parseD6DoctorCell_(sourceRaw);
@@ -129,7 +158,7 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     }
   }
 
-  // 3. 当日D3シフトからの検索（その日に勤務している医師から最優先で特定）
+  // 3. 当日D3シフトからの検索
   if (cleanTarget || cleanLic) {
     const clinicHint = (resolvedApproachType === "延長相談" || resolvedApproachType === "早出相談") ? clinicName : fromClinic;
     let sameDayDocs = [];

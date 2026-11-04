@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * 02b_Setup_And_MailParser.gs
- * D7シート初期セットアップ（『オフライン修正シート』追加）・メール種別分離収集対応版
+ * （1名への複数枠打診の全種別1通統合・「案が多く申し訳ございません」枕詞自動付与・見やすい罫線レイアウト対応版）
  * ============================================================================
  */
 
@@ -19,7 +19,7 @@ function ensureReviewStyleSheet_(ss, sheetName, headerColor) {
   const reviewHeaders = getReviewHeadersCommon_();
   const sh = ensureSheet_(ss, sheetName, reviewHeaders, headerColor || "#1a73e8");
   sh.setColumnWidth(9, 140);
-  sh.setColumnWidth(17, 360);
+  sh.setColumnWidth(17, 380);
   sh.setColumnWidth(18, 240);
   sh.setColumnWidth(21, 300);
   sh.setColumnWidth(22, 260);
@@ -31,10 +31,8 @@ function ensureReviewStyleSheet_(ss, sheetName, headerColor) {
 function setupD7Workspace() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  // 1. 口頭会議用：『文案・Slack投稿レビュー』シート
   ensureReviewStyleSheet_(ss, SHEET_NAMES.D7_REVIEW, "#1a73e8");
 
-  // 2. ドキュメント確定（編集くん64）用：『オフライン修正シート』
   const offlineSheetName = SHEET_NAMES.D7_OFFLINE_REVIEW || "オフライン修正シート";
   ensureReviewStyleSheet_(ss, offlineSheetName, "#0b8043");
 
@@ -92,10 +90,6 @@ function inferTimeFromCategory_(timeCategory, isKitaKasai) {
   return "";
 }
 
-/**
- * 発言内容が「すでに完了した過去の調整の事後報告（移動してもらいました／埋まりました等）」のみであり、
- * 今後のアクションを含まない場合は true を返す（※ドキュメント確定分は常にスキップしない）
- */
 function isPastCompletedReport_(evidenceText) {
   const s = String(evidenceText || "").trim();
   if (!s) return false;
@@ -106,85 +100,108 @@ function isPastCompletedReport_(evidenceText) {
 }
 
 /**
- * 同一医師への複数枠の打診を1通の送信文案に統合する
+ * ★全面改良版：1名の医師に対して複数枠（2枠以上）の交渉がある場合、
+ * アプローチ種別（移動・個別・延長・早出）や同日・別日を問わず、必ず1通の送信文案に統合する関数。
+ * また、複数枠を打診する際は「ご相談の案が多く大変申し訳ございません。」の枕詞を添えて見やすく整形する。
  */
 function consolidateMultiDateDoctorDrafts_(reviewRows, draftParamsByRowIdx) {
-  const moverGroups = new Map();
-  const individualGroups = new Map();
+  const byDoctor = new Map();
 
   for (let i = 0; i < draftParamsByRowIdx.length; i++) {
     const p = draftParamsByRowIdx[i];
     if (!p || !p.doctorName || p.doctorName === "{医師名}" || p.doctorName.includes("\n")) continue;
     if (p.rowState !== "未レビュー") continue;
+    if (p.approachType === "募集継続・ステイ") continue;
 
-    if (p.approachType === "勤務地変更相談") {
-      if (!moverGroups.has(p.doctorName)) {
-        moverGroups.set(p.doctorName, []);
-      }
-      const list = moverGroups.get(p.doctorName);
-      if (!list.some(existing => existing.dateStr === p.dateStr && existing.clinicName === p.clinicName)) {
-        list.push(p);
-      }
-    } else if (p.approachType === "個別アプローチ") {
-      if (!individualGroups.has(p.doctorName)) {
-        individualGroups.set(p.doctorName, []);
-      }
-      const list = individualGroups.get(p.doctorName);
-      if (!list.some(existing => existing.dateStr === p.dateStr && existing.clinicName === p.clinicName && existing.absenceStart === p.absenceStart)) {
-        list.push(p);
-      }
+    const cleanDocKey = String(p.doctorName).replace(/先生$/g, "").trim();
+    if (!cleanDocKey) continue;
+
+    if (!byDoctor.has(cleanDocKey)) {
+      byDoctor.set(cleanDocKey, []);
+    }
+    const list = byDoctor.get(cleanDocKey);
+    const isDup = list.some(ex =>
+      ex.dateStr === p.dateStr &&
+      ex.clinicName === p.clinicName &&
+      ex.absenceStart === p.absenceStart &&
+      ex.approachType === p.approachType
+    );
+    if (!isDup) {
+      list.push(p);
     }
   }
 
-  // 1. 勤務地変更相談の複数日統合
-  for (const [docName, entries] of moverGroups.entries()) {
+  for (const [docName, entries] of byDoctor.entries()) {
     if (entries.length < 2) continue;
 
-    entries.sort((a, b) => a.dateStr.localeCompare(b.dateStr));
-    const combinedDraft = buildMultiDateTemplate_(entries);
+    entries.sort((a, b) =>
+      a.dateStr.localeCompare(b.dateStr) ||
+      String(a.consultStart || a.absenceStart || "").localeCompare(String(b.consultStart || b.absenceStart || ""))
+    );
 
-    const primaryEntry = entries[0];
-    const primarySheetRow = primaryEntry.rowIndex + 2;
-    const allDatesLabel = entries.map(e => e.dateStr.slice(5)).join(", ");
+    const uniqueDates = Array.from(new Set(entries.map(e => e.dateStr)));
+    const allMovers = entries.every(e => e.approachType === "勤務地変更相談");
+    const allIndividuals = entries.every(e => e.approachType === "個別アプローチ");
 
-    reviewRows[primaryEntry.rowIndex][16] = combinedDraft;
-
-    for (let k = 1; k < entries.length; k++) {
-      const subIdx = entries[k].rowIndex;
-      reviewRows[subIdx][16] = "【※" + primarySheetRow + "行目の" + docName + "先生の送信文案に複数日分（" + allDatesLabel + "）を1通に統合済み】";
+    let combinedDraft = "";
+    // パターン1：同じ日に複数の拠点へ「勤務地変更相談（AまたはBの選択的移動）」をかける場合
+    if (uniqueDates.length === 1 && allMovers) {
+      combinedDraft = buildSameDateMultiClinicMoverTemplate_(entries);
     }
-  }
-
-  // 2. 個別アプローチ（おまとめ打診・複数日追加勤務打診）の1通統合
-  for (const [docName, entries] of individualGroups.entries()) {
-    if (entries.length < 2) continue;
-
-    entries.sort((a, b) => a.dateStr.localeCompare(b.dateStr) || String(a.absenceStart || "").localeCompare(String(b.absenceStart || "")));
-    const combinedDraft = buildMultiDateIndividualTemplate_(entries);
+    // パターン2：すべて「個別アプローチ（追加勤務）」で複数枠（同日または複数日）をかける場合
+    else if (allIndividuals) {
+      combinedDraft = buildMultiDateIndividualTemplate_(entries);
+    }
+    // パターン3：複数日程の移動、または「移動＋個別」「延長＋別枠」など複数種別・複数枠が混在する場合
+    else {
+      combinedDraft = buildUnifiedMultiSlotDraftTemplate_(entries);
+    }
 
     const primaryEntry = entries[0];
     const primarySheetRow = primaryEntry.rowIndex + 2;
-    const allDatesLabel = entries.map(e => e.dateStr.slice(5) + "(" + e.clinicName + ")").join(", ");
+    const allSlotsShortLabel = entries.map(e => `${e.dateStr.slice(5)} ${e.clinicName}`).join("・");
 
     reviewRows[primaryEntry.rowIndex][16] = combinedDraft;
 
+    // 同日複数拠点の移動の場合は、作業メモ欄にも「（候補：A・B）」を自動追記
+    if (uniqueDates.length === 1 && allMovers) {
+      const allClinicsLabel = entries.map(e => e.clinicName).join("・");
+      entries.forEach(e => {
+        if (reviewRows[e.rowIndex][17] && !String(reviewRows[e.rowIndex][17]).includes("候補：")) {
+          reviewRows[e.rowIndex][17] += `（候補：${allClinicsLabel}）`;
+        }
+      });
+    }
+
     for (let k = 1; k < entries.length; k++) {
       const subIdx = entries[k].rowIndex;
-      reviewRows[subIdx][16] = "【※" + primarySheetRow + "行目の" + docName + "先生のおまとめ送信文案に複数枠分（" + allDatesLabel + "）を1通に統合済み】";
+      reviewRows[subIdx][16] = `【※${primarySheetRow}行目の${docName}先生の送信文案に全${entries.length}枠分（${allSlotsShortLabel}）を1通にまとめて出力済み】`;
     }
   }
 }
 
-function buildMultiDateIndividualTemplate_(entries) {
+/**
+ * パターン1：同日に複数拠点（AまたはB）へ勤務地変更相談を行う際の選択式テンプレート
+ * （「ご相談の案が多く大変申し訳ございません。」＋見やすい罫線ボックス付き）
+ */
+function buildSameDateMultiClinicMoverTemplate_(entries) {
   const first = entries[0];
   const docName = String(first.doctorName || "{医師名}").replace(/先生$/g, "");
   const staff = first.staffName || "{担当者名}";
+  const mdDay = typeof formatMdDay_ === "function" ? formatMdDay_(first.dateObj) : first.dateStr;
+  const fromClinic = first.fromClinicName || "現在拠点";
+  const curTime = `${first.currentStart || ""}~${first.currentEnd || ""}`;
+  const curWage = formatComma_(first.currentDailyWage || 0);
 
-  const slotLines = entries.map(e => {
-    const ymdLabel = typeof formatYmdDay_ === "function" ? formatYmdDay_(e.dateObj) : e.dateStr;
-    const absRange = (e.absenceStart || "") + "~" + (e.absenceEnd || "");
-    const wageText = e.consultDailyWage ? " (日給:" + formatComma_(e.consultDailyWage) + "円)" : "";
-    return "・" + ymdLabel + " 【" + e.clinicName + "】" + absRange + wageText;
+  const toHeaderStr = entries.map(e => `【${e.clinicName}】`).join(" または ");
+  const circledNums = ["①", "②", "③", "④", "⑤", "⑥"];
+
+  const consultLines = entries.map((e, idx) => {
+    const numLabel = circledNums[idx] || (idx + 1);
+    const conTime = `${e.consultStart || e.absenceStart || ""}~${e.consultEnd || e.absenceEnd || ""}`;
+    const conWage = formatComma_(e.consultDailyWage || 0);
+    const allowSuffix = e.hasRequestAllow ? "＋移動依頼手当10,000円" : "";
+    return `【候補${numLabel}】【${e.clinicName}】${conTime}（日給:${conWage}円${allowSuffix}）`;
   });
 
   return [
@@ -192,12 +209,78 @@ function buildMultiDateIndividualTemplate_(entries) {
     "平素より大変お世話になっております。",
     "ドクターサポート事務局の" + staff + "でございます。",
     "",
-    "この度は、下記日程のご勤務につきましてご相談がありご連絡させていただきました。",
-    "現在、複数日程にて医師不在となる可能性がある枠がございますため、",
-    "大変恐縮ではございますが、もし先生のご都合がよろしければ、いずれかの日程でもご勤務いただくことは可能でしょうか。",
+    "この度は、" + mdDay + "のご勤務につきましてご相談がありご連絡させていただきました。",
+    "ご相談の案が多く大変申し訳ございません。",
+    "当日のご勤務拠点を【" + fromClinic + "】より、下記の " + toHeaderStr + " のいずれかへご変更いただくことは可能でしょうか。",
     "",
-    "■ご相談日程",
+    "━━━━━━━━━━━━━━━━━━━━",
+    "■ " + mdDay + " ご相談内容",
+    "【現在のご勤務】",
+    "・【" + fromClinic + "】" + curTime + "（日給:" + curWage + "円）",
+    " ↓",
+    "【ご変更候補（いずれか1枠）】",
+    ...consultLines,
+    "━━━━━━━━━━━━━━━━━━━━",
+    "",
+    "※上記募集は公開中のため、ご返信いただいた際に充足している可能性もございます。",
+    "恐れ入りますが、充足の際はご容赦くださいませ。",
+    "",
+    "お忙しいところ、ご負担をおかけして大変恐縮ではございますが、ご検討いただけましたら幸いです。",
+    "何卒よろしくお願い申し上げます。",
+    "",
+    "ドクターサポート事務局\u3000" + staff
+  ].join("\n");
+}
+
+/**
+ * パターン2：個別アプローチ（追加勤務）で複数枠をまとめて打診する際のテンプレート
+ * （「ご相談の案が多く大変申し訳ございません。」＋見やすい罫線＆番号リスト付き）
+ */
+function buildMultiDateIndividualTemplate_(entries) {
+  const first = entries[0];
+  const docName = String(first.doctorName || "{医師名}").replace(/先生$/g, "");
+  const staff = first.staffName || "{担当者名}";
+  const circledNums = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧"];
+
+  // 同日・同時間帯の重複があるか（AまたはBの選択式か）をチェック
+  let hasSameTimeOverlap = false;
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      if (entries[i].dateStr === entries[j].dateStr) {
+        const rangeA = `${entries[i].absenceStart || ""}-${entries[i].absenceEnd || ""}`;
+        const rangeB = `${entries[j].absenceStart || ""}-${entries[j].absenceEnd || ""}`;
+        if (typeof isTimeOverlapping_ === "function" && isTimeOverlapping_(rangeA, rangeB)) {
+          hasSameTimeOverlap = true;
+        }
+      }
+    }
+  }
+
+  const slotLines = entries.map((e, idx) => {
+    const ymdLabel = typeof formatYmdDay_ === "function" ? formatYmdDay_(e.dateObj) : e.dateStr;
+    const absRange = (e.absenceStart || "") + "~" + (e.absenceEnd || "");
+    const wageText = e.consultDailyWage ? "（日給:" + formatComma_(e.consultDailyWage) + "円）" : "";
+    const numLabel = circledNums[idx] || (idx + 1);
+    return `【候補${numLabel}】${ymdLabel} 【${e.clinicName}】${absRange}${wageText}`;
+  });
+
+  const askLine = hasSameTimeOverlap
+    ? "現在、複数拠点にて医師不在となる可能性がある時間帯がございますため、もし先生のご都合がよろしければ、下記のいずれかの枠にてご勤務いただくことは可能でしょうか。"
+    : "現在、複数日程（時間帯）にて医師不在となる可能性がある枠がございますため、もし先生のご都合がよろしければ、下記のいずれかの枠（または複数枠）にてご勤務いただくことは可能でしょうか。";
+
+  return [
+    docName + "先生",
+    "平素より大変お世話になっております。",
+    "ドクターサポート事務局の" + staff + "でございます。",
+    "",
+    "この度は、下記日程のご勤務につきましてご相談がありご連絡させていただきました。",
+    "ご相談の案が多く大変申し訳ございません。",
+    askLine,
+    "",
+    "━━━━━━━━━━━━━━━━━━━━",
+    `■ ご相談日程一覧（計${entries.length}枠）`,
     ...slotLines,
+    "━━━━━━━━━━━━━━━━━━━━",
     "",
     "※上記募集は公開中のため、ご応募いただいた際に充足している可能性もございます。",
     "恐れ入りますが、充足の際はご容赦くださいませ。",
@@ -210,10 +293,72 @@ function buildMultiDateIndividualTemplate_(entries) {
 }
 
 /**
- * 分割送信された複数の【Agent解析JSON】メール（Part 1, Part 2...）をすべて収集・結合する
- * - isOfflineDocMode === true  : 「ドキュメント確定分」メールのみを収集（➔『オフライン修正シート』用）
- * - isOfflineDocMode === false : 口頭会議の文字起こしメールのみを収集（➔『文案・Slack投稿レビュー』用）
+ * パターン3：複数日程の移動、または「移動＋個別」「延長＋別枠」など複数枠が混在する場合の統合テンプレート
+ * （「ご相談の案が多く大変申し訳ございません。」＋枠ごとに見やすく整理したブロック表示）
  */
+function buildUnifiedMultiSlotDraftTemplate_(entries) {
+  const first = entries[0];
+  const docName = String(first.doctorName || "{医師名}").replace(/先生$/g, "");
+  const staff = first.staffName || "{担当者名}";
+  const circledNums = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧"];
+
+  const blocks = entries.map((e, idx) => {
+    const numLabel = circledNums[idx] || (idx + 1);
+    const ymdLabel = typeof formatYmdDay_ === "function" ? formatYmdDay_(e.dateObj) : e.dateStr;
+    const curTime = `${e.currentStart || ""}~${e.currentEnd || ""}`;
+    const conTime = `${e.consultStart || e.absenceStart || ""}~${e.consultEnd || e.absenceEnd || ""}`;
+    const curWage = formatComma_(e.currentDailyWage || 0);
+    const conWage = formatComma_(e.consultDailyWage || 0);
+    const allowSuffix = (e.approachType === "勤務地変更相談" && e.hasRequestAllow) ? "＋移動依頼手当10,000円" : "";
+
+    if (e.approachType === "勤務地変更相談") {
+      const fromC = e.fromClinicName || "現在拠点";
+      return [
+        `【ご相談${numLabel}】${ymdLabel}（拠点移動のご相談）`,
+        `・現在：【${fromC}】${curTime}（日給:${curWage}円）`,
+        `・ご相談：【${e.clinicName}】${conTime}（日給:${conWage}円${allowSuffix}）`
+      ].join("\n");
+    } else if (e.approachType === "延長相談" || e.approachType === "早出相談") {
+      const typeLabel = e.approachType === "延長相談" ? "時間延長のご相談" : "前倒し（早出）のご相談";
+      return [
+        `【ご相談${numLabel}】${ymdLabel}（${typeLabel}）`,
+        `・現在：【${e.clinicName}】${curTime}（日給:${curWage}円）`,
+        `・ご相談：【${e.clinicName}】${conTime}（日給:${conWage}円）`
+      ].join("\n");
+    } else {
+      const absTime = `${e.absenceStart || ""}~${e.absenceEnd || ""}`;
+      return [
+        `【ご相談${numLabel}】${ymdLabel}（追加勤務のご相談）`,
+        `・ご相談：【${e.clinicName}】${absTime}（日給:${conWage}円）`
+      ].join("\n");
+    }
+  });
+
+  return [
+    docName + "先生",
+    "平素より大変お世話になっております。",
+    "ドクターサポート事務局の" + staff + "でございます。",
+    "",
+    "この度は、下記のご勤務につきましてご相談がありご連絡させていただきました。",
+    "ご相談の案が多く大変申し訳ございません。",
+    "もし先生のご都合がよろしければ、下記のいずれかの枠（または複数枠）にてご協力をいただくことは可能でしょうか。",
+    "",
+    "━━━━━━━━━━━━━━━━━━━━",
+    `■ ご相談内容一覧（計${entries.length}件）`,
+    "",
+    blocks.join("\n\n"),
+    "━━━━━━━━━━━━━━━━━━━━",
+    "",
+    "※上記募集は公開中のため、ご返信いただいた際に充足している可能性もございます。",
+    "恐れ入りますが、充足の際はご容赦くださいませ。",
+    "",
+    "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
+    "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
+    "",
+    "ドクターサポート事務局\u3000" + staff
+  ].join("\n");
+}
+
 function collectLatestJsonBatchFromGmail_(isOfflineDocMode) {
   const searchQuery = isOfflineDocMode
     ? 'subject:"【Agent解析JSON】ドキュメント確定分"'

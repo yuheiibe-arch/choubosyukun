@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * 04_Wage_Calculator.gs
- * 内閣府祝日CSV取得・D4時給表自動選択・15分刻み日給計算（動的ヘッダー＆全拠点対応版）
+ * （特別時給のカスタム加算幅［+2,000円〜+5,000円］＆「さらに加算」自動認識・15分刻み日給計算版）
  * ============================================================================
  */
 
@@ -174,17 +174,42 @@ function findClinicRateInTables_(wageSs, dateStr, clinicName, dept) {
   return null;
 }
 
+/**
+ * ★新設：『編集くん 64』から送られた特別時給のカスタム加算額（+2,000円〜+5,000円、または「さらに+2,000円加算」）を解析するヘルパー
+ */
+function resolveSpecialHourlyBonusAmount_(isSpecial, isSpecialFromD6, specialWageHintText) {
+  if (!isSpecial) return 0;
+  const hint = String(specialWageHintText || "");
+
+  // 「さらに+3,000円加算」のように、既に特別時給(+2,000円)の枠にさらに上乗せ交渉する場合
+  const extraMatch = hint.match(/さらに\s*[\+＋]?\s*([0-9,]+)\s*円/);
+  if (extraMatch) {
+    const extraAmt = Number(extraMatch[1].replace(/,/g, "")) || 0;
+    const baseSp = isSpecialFromD6 ? 2000 : 2000;
+    return baseSp + extraAmt;
+  }
+
+  // 「特別時給+3,000円交渉」のように加算額が明示されている場合
+  const amtMatch = hint.match(/特別時給[^\d+＋]*[\+＋]\s*([0-9,]+)\s*円/);
+  if (amtMatch) {
+    const amt = Number(amtMatch[1].replace(/,/g, "")) || 2000;
+    return amt;
+  }
+
+  return 2000;
+}
+
 function calculateWagesAndAllowance_(params) {
   const {
     wageSs, dateStr, clinicName, dept, fromClinicName,
     approachType, absenceTime, currentStart, currentEnd,
     consultStart, consultEnd, isCurrentVaccine,
-    isSpecialFromMtg, isSpecialFromD6, isFullTime, alreadyHasAllowance, holidaySet
+    isSpecialFromMtg, isSpecialFromD6, isFullTime, alreadyHasAllowance, holidaySet,
+    specialWageHintText, evidenceText
   } = params;
 
   const isSpecial = Boolean(isSpecialFromMtg || isSpecialFromD6);
 
-  // 勤務地変更時に相談開始・終了が未指定の場合は、現在シフト（まるごと移動）を引き継ぐ
   const effConsultStart = consultStart || currentStart || (absenceTime ? absenceTime.split("-")[0] : "");
   const effConsultEnd = consultEnd || currentEnd || (absenceTime ? absenceTime.split("-")[1] : "");
 
@@ -227,7 +252,7 @@ function calculateWagesAndAllowance_(params) {
   const dayCategory = getDayCategory_(dateStr, holidaySet);
 
   let fromRates = targetRates;
-  if (fromClinicName && fromClinicName !== clinicName && fromClinicName !== "ワクチン専任") {
+  if (fromClinicName && fromClinicName !== clinicName && fromClinicName !== "ワクチン専任" && !fromClinicName.includes("バックアップ")) {
     const fromFound = findClinicRateInTables_(wageSs, dateStr, fromClinicName, dept);
     if (fromFound && fromFound.rates) {
       fromRates = fromFound.rates;
@@ -249,7 +274,13 @@ function calculateWagesAndAllowance_(params) {
     }
   }
 
-  const specialBonus = isSpecial ? 2000 : 0;
+  // ★特別時給の加算額（標準+2,000円、または『編集くん64』で指定された+3,000円〜+5,000円・さらに加算）を取得
+  const specialBonus = resolveSpecialHourlyBonusAmount_(
+    isSpecial,
+    isSpecialFromD6,
+    (specialWageHintText || "") + " " + (evidenceText || "")
+  );
+
   const effectiveSpecialRange = (absenceTime && absenceTime.includes("-"))
     ? absenceTime
     : `${effConsultStart}-${effConsultEnd}`;
@@ -257,7 +288,7 @@ function calculateWagesAndAllowance_(params) {
   let consultDailyWage = 0;
   let consultPm1DailyWage = 0;
 
-  if (approachType === "個別アプローチ" || approachType === "募集継続・ステイ") {
+  if (approachType === "個別アプローチ" || approachType === "バックアップ勤務依頼" || approachType === "募集継続・ステイ") {
     const [absS, absE] = (absenceTime || "-").split("-");
     if (absS && absE) {
       consultDailyWage = calcIntervalWage_(
@@ -265,7 +296,6 @@ function calculateWagesAndAllowance_(params) {
       );
     }
   } else if (approachType === "勤務地変更相談") {
-    // ★重要：「移動先の時給（特別時給対象枠なら+2,000円した後）」と「移動元の通常時給」を比較し、高い方を採用する
     const fromRateObj = isCurrentVaccine
       ? { am: VACCINE_DEDICATED_HOURLY_WAGE, pm: VACCINE_DEDICATED_HOURLY_WAGE, night: VACCINE_DEDICATED_HOURLY_WAGE }
       : fromRates[dayCategory];
@@ -305,7 +335,7 @@ function calculateWagesAndAllowance_(params) {
   }
 
   let requestAllowance = 0;
-  if (approachType === "勤務地変更相談" && !alreadyHasAllowance) {
+  if (approachType === "勤務地変更相談" && !alreadyHasAllowance && !(fromClinicName && fromClinicName.includes("バックアップ"))) {
     requestAllowance = 10000;
   }
 
@@ -319,7 +349,7 @@ function calculateWagesAndAllowance_(params) {
     requestAllowance,
     diffHoursText: calcDiffHoursText_(currentStart, currentEnd, effConsultStart, effConsultEnd),
     sheetNameUsed,
-    wageNote: `${dayCategory === "weekday" ? "平日" : dayCategory === "sat" ? "土曜" : "日祝"} / 特別時給:${isSpecial ? "あり(通常時給+2,000円/h)" : "なし"}${isCurrentVaccine ? " / 現在枠:ワクチン専任(13,000円/h)" : ""}`
+    wageNote: `${dayCategory === "weekday" ? "平日" : dayCategory === "sat" ? "土曜" : "日祝"} / 特別時給:${isSpecial ? `あり(通常時給+${formatComma_(specialBonus)}円/h)` : "なし"}${isCurrentVaccine ? " / 現在枠:ワクチン専任(13,000円/h)" : ""}`
   };
 }
 
@@ -346,9 +376,6 @@ function getSlotHourlyRate_(tMin, rateObj, isKitaKasai) {
   return Number(rateObj.am || 0);
 }
 
-/**
- * 勤務地変更相談用：15分刻みで「移動元の現在時給」と「移動先の時給（特別時給枠は+2,000円込み）」を比較し、高い方で日給を算出する
- */
 function calcMoverConsultWage_(startStr, endStr, fromRates, isFromKita, targetRates, isTargetKita, specialRangeStr, specialBonusPerHour) {
   const startMin = toMinutes_(startStr);
   const endMin = toMinutes_(endStr);
