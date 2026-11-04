@@ -1,13 +1,10 @@
 /**
  * ============================================================================
  * 05_Slack_And_D6Post.gs
- * 了承行のD6「作業メモ」転記・Slack投稿（『文案・Slack投稿レビュー』『オフライン修正シート』両対応版）
+ * 了承行のD6「作業メモ」転記・Slack投稿（1行集約された複数枠の一括転記・投稿対応版）
  * ============================================================================
  */
 
-/**
- * Slackチャンネルから既存の「超募集MTGログ」親スレッド（月・前半/後半）を検索して Map("10月後半" -> ts) を返す
- */
 function fetchSlackParentThreadMap_(token, channelId) {
   const map = new Map();
   if (!token || !channelId) return map;
@@ -41,9 +38,6 @@ function fetchSlackParentThreadMap_(token, channelId) {
   return map;
 }
 
-/**
- * 対象日から「10月後半」などのキーと、親スレッド未作成時の公式ヘッダー文字列を作る
- */
 function getSlackThreadKeyAndHeader_(dateStr, fallbackTitle) {
   const norm = normalizeDateStr_(dateStr);
   if (!norm) {
@@ -63,9 +57,6 @@ function getSlackThreadKeyAndHeader_(dateStr, fallbackTitle) {
   };
 }
 
-/**
- * Slack本文用の日付見出し「10月24日 (土)」を生成する
- */
 function formatSlackDateHeader_(dateStr) {
   const norm = normalizeDateStr_(dateStr);
   if (!norm) return "";
@@ -75,9 +66,6 @@ function formatSlackDateHeader_(dateStr) {
   return `${d.getMonth() + 1}月${d.getDate()}日 (${days[d.getDay()]})`;
 }
 
-/**
- * 既存のSlack本文の先頭行（`10/24` など）を「`10月24日 (土)`」形式に正規化する
- */
 function normalizeSlackBodyDateHeader_(slackText, targetDate) {
   const header = formatSlackDateHeader_(targetDate);
   if (!header) return slackText;
@@ -89,9 +77,6 @@ function normalizeSlackBodyDateHeader_(slackText, targetDate) {
   return "`" + header + "`\n" + s;
 }
 
-/**
- * 親スレッド（thread_ts）へ返信する。親スレッドがまだ無い場合は親を作成してから返信する
- */
 function postToSlackThread_(threadTitle, text, targetDate, parentThreadMap) {
   const token = PropertiesService.getScriptProperties().getProperty("SLACK_BOT_TOKEN");
   if (!token) return "SLACK_TOKEN未設定(作業メモ転記のみ完了)";
@@ -143,7 +128,7 @@ function postToSlackThread_(threadTitle, text, targetDate, parentThreadMap) {
 }
 
 /**
- * 現在開いているシート（『オフライン修正シート』または『文案・Slack投稿レビュー』）の「確認済」チェック行を一括でD6転記・Slack投稿・履歴記録する
+ * ★1行に集約された複数枠（改行区切りの日付・拠点・不在時間）を展開して全枠分のD6転記＆Slack投稿を行う関数
  */
 function executeApprovedRows() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -216,86 +201,100 @@ function executeApprovedRows() {
   for (const idx of targetIndices) {
     const sheetRowNum = idx + 2;
     const row = dispValues[idx];
-    const targetDate = normalizeDateStr_(row[3]);
-    const targetClinic = String(row[4] || "").trim();
-    const targetNormClinic = normalizeClinicForMatch_(targetClinic);
-    const targetTime = normalizeTimeRange_(row[5]);
+
+    // ★1行に複数枠が改行区切りで集約されている場合に対応して展開する
+    const dateList = String(row[3] || "").split(/\r?\n/).map(s => normalizeDateStr_(s)).filter(Boolean);
+    const clinicList = String(row[4] || "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const timeList = String(row[5] || "").split(/\r?\n/).map(s => normalizeTimeRange_(s)).filter(Boolean);
     const targetDept = String(row[6] || "").trim();
     const approachType = String(row[7] || "").trim();
     const doctorsText = String(row[8] || "").trim();
     const staffName = extractCleanStaffName_(String(row[15] || "").trim());
     const memoToAppend = String(row[17] || "").trim();
-    const threadTitle = String(row[18] || "").trim();
-    const slackText = String(row[20] || "").trim();
+    const fallbackThreadTitle = String(row[18] || "").trim();
+    const slackBlocks = String(row[20] || "").split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
 
-    const exactTimeD6Rows = [];
-    const sameClinicDateD6Rows = [];
-
-    for (let r = 2; r < d6Keys.length; r++) {
-      const rDate = normalizeDateStr_(d6Keys[r][colDate - 1]);
-      if (rDate !== targetDate) continue;
-
-      const rClinic = String(d6Keys[r][colClinic - 1] || "").trim();
-      const rNormClinic = normalizeClinicForMatch_(rClinic);
-      const rTime = normalizeTimeRange_(d6Keys[r][colTime - 1]);
-
-      const isKitaOrKame = (targetNormClinic === "北葛西" || targetNormClinic === "亀有");
-      const isClinicMatch = isKitaOrKame
-        ? (rClinic === targetClinic || (rNormClinic === targetNormClinic && (!targetDept || rClinic.includes(targetDept))))
-        : (rClinic === targetClinic || rNormClinic === targetNormClinic);
-
-      if (isClinicMatch) {
-        sameClinicDateD6Rows.push(r + 1);
-        if (!targetTime || !rTime || rTime === targetTime || isTimeOverlapping_(rTime, targetTime)) {
-          exactTimeD6Rows.push(r + 1);
-        }
-      }
-    }
-
-    const matchedD6Rows = exactTimeD6Rows.length > 0 ? exactTimeD6Rows : sameClinicDateD6Rows;
+    const slotCount = Math.max(dateList.length, clinicList.length, 1);
 
     try {
-      if (matchedD6Rows.length > 0 && memoToAppend) {
-        for (const matchedD6Row of matchedD6Rows) {
-          const memoCell = d6Sheet.getRange(matchedD6Row, colMemo);
-          const currentMemo = String(memoCell.getDisplayValue() || "").trim();
-          const cleanTargetMemo = memoToAppend.replace(/^・/, "").trim();
-          const lines = currentMemo ? currentMemo.split(/\r?\n/).map(l => l.trim()).filter(Boolean) : [];
-          const alreadyExists = lines.some(l => l.replace(/^・/, "").trim() === cleanTargetMemo || l.includes(cleanTargetMemo));
-          if (!alreadyExists) {
-            lines.push(memoToAppend);
-            memoCell.setValue(lines.join("\n"));
+      for (let sIdx = 0; sIdx < slotCount; sIdx++) {
+        const targetDate = dateList[sIdx] || dateList[0] || "";
+        const targetClinic = clinicList[sIdx] || clinicList[0] || "";
+        const targetTime = timeList[sIdx] || timeList[0] || "";
+        const slackText = slackBlocks[sIdx] || slackBlocks[0] || "";
+        const threadTitle = buildSlackThreadTitle_(targetDate) || fallbackThreadTitle;
+
+        const targetNormClinic = normalizeClinicForMatch_(targetClinic);
+        const exactTimeD6Rows = [];
+        const sameClinicDateD6Rows = [];
+
+        for (let r = 2; r < d6Keys.length; r++) {
+          const rDate = normalizeDateStr_(d6Keys[r][colDate - 1]);
+          if (rDate !== targetDate) continue;
+
+          const rClinic = String(d6Keys[r][colClinic - 1] || "").trim();
+          const rNormClinic = normalizeClinicForMatch_(rClinic);
+          const rTime = normalizeTimeRange_(d6Keys[r][colTime - 1]);
+
+          const isKitaOrKame = (targetNormClinic === "北葛西" || targetNormClinic === "亀有");
+          const isClinicMatch = isKitaOrKame
+            ? (rClinic === targetClinic || (rNormClinic === targetNormClinic && (!targetDept || rClinic.includes(targetDept))))
+            : (rClinic === targetClinic || rNormClinic === targetNormClinic);
+
+          if (isClinicMatch) {
+            sameClinicDateD6Rows.push(r + 1);
+            if (!targetTime || !rTime || rTime === targetTime || isTimeOverlapping_(rTime, targetTime)) {
+              exactTimeD6Rows.push(r + 1);
+            }
           }
         }
-        SpreadsheetApp.flush();
-      }
 
-      const postId = postToSlackThread_(threadTitle, slackText, targetDate, parentThreadMap);
+        const matchedD6Rows = exactTimeD6Rows.length > 0 ? exactTimeD6Rows : sameClinicDateD6Rows;
 
-      if (histSheet && doctorsText && doctorsText !== "該当候補なし") {
-        const docList = doctorsText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-        for (const docName of docList) {
+        if (matchedD6Rows.length > 0 && memoToAppend) {
+          for (const matchedD6Row of matchedD6Rows) {
+            const memoCell = d6Sheet.getRange(matchedD6Row, colMemo);
+            const currentMemo = String(memoCell.getDisplayValue() || "").trim();
+            const cleanTargetMemo = memoToAppend.replace(/^・/, "").trim();
+            const lines = currentMemo ? currentMemo.split(/\r?\n/).map(l => l.trim()).filter(Boolean) : [];
+            const alreadyExists = lines.some(l => l.replace(/^・/, "").trim() === cleanTargetMemo || l.includes(cleanTargetMemo));
+            if (!alreadyExists) {
+              lines.push(memoToAppend);
+              memoCell.setValue(lines.join("\n"));
+            }
+          }
+          SpreadsheetApp.flush();
+        }
+
+        const postId = postToSlackThread_(threadTitle, slackText, targetDate, parentThreadMap);
+
+        if (histSheet && doctorsText && doctorsText !== "該当候補なし") {
+          const docList = doctorsText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+          for (const docName of docList) {
+            appendRowAndTrimBlank_(
+              histSheet,
+              [nowStr, targetDate, targetClinic, targetTime, targetDept, approachType, docName, staffName || userEmail, postId],
+              9
+            );
+          }
+        }
+
+        if (logSheet) {
+          const actionLabel = matchedD6Rows.length > 0
+            ? `D6転記・Slack投稿完了(${revSheet.getName()})`
+            : `Slack投稿完了(D6該当枠なし/${revSheet.getName()})`;
           appendRowAndTrimBlank_(
-            histSheet,
-            [nowStr, targetDate, targetClinic, targetTime, targetDept, approachType, docName, staffName || userEmail, postId],
-            9
+            logSheet,
+            [nowStr, actionLabel, postId, `${targetDate} ${targetClinic}${targetTime}`, 1, `${memoToAppend} (${staffName || userEmail})`],
+            6
           );
         }
-      }
 
-      if (logSheet) {
-        const actionLabel = matchedD6Rows.length > 0
-          ? `D6転記・Slack投稿完了(${revSheet.getName()})`
-          : `Slack投稿完了(D6該当枠なし/${revSheet.getName()})`;
-        appendRowAndTrimBlank_(
-          logSheet,
-          [nowStr, actionLabel, postId, `${targetDate} ${targetClinic}${targetTime}`, 1, `${memoToAppend} (${staffName || userEmail})`],
-          6
-        );
+        if (slotCount > 1) Utilities.sleep(500);
       }
 
       completedSheetRows.push(sheetRowNum);
-      Utilities.sleep(800);
+      Utilities.sleep(600);
     } catch (e) {
       revSheet.getRange(sheetRowNum, 2).setValue("エラー");
       revSheet.getRange(sheetRowNum, 24).setValue(e.message);
@@ -323,9 +322,6 @@ function executeApprovedRows() {
   if (logSheet) applyLeftMiddleToSheet_(logSheet);
 }
 
-/**
- * 📢 データ取込完了時にChatwork（[toall] + [info]）とSlack（<!here> + コードブロック）へ通知を送る
- */
 function sendImportCompletionNotifications_(sheetNameOpt) {
   const todayStr = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd");
   const targetLabel = sheetNameOpt ? `（${sheetNameOpt}）` : "";
@@ -347,8 +343,6 @@ function sendImportCompletionNotifications_(sheetNameOpt) {
     } catch (e) {
       console.error("Chatwork通知エラー: " + e.message);
     }
-  } else {
-    console.log("CHATWORK_API_KEY が未設定のためChatwork通知をスキップしました。");
   }
 
   const slackToken = props.getProperty("SLACK_BOT_TOKEN");
@@ -375,14 +369,9 @@ function sendImportCompletionNotifications_(sheetNameOpt) {
     } catch (e) {
       console.error("Slack通知エラー: " + e.message);
     }
-  } else {
-    console.log("SLACK_BOT_TOKEN が未設定のためSlack通知をスキップしました。");
   }
 }
 
-/**
- * デバッグ・確認用：現在のD7レビューシート・オフライン修正シート・確認リストの内容をログ出力する
- */
 function inspectCurrentOutput() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const revSheet = ss.getSheetByName(SHEET_NAMES.D7_REVIEW);
@@ -397,15 +386,11 @@ function inspectCurrentOutput() {
       const rows = sh.getRange(2, 1, sh.getLastRow() - 1, 24).getDisplayValues();
       rows.forEach((r, idx) => {
         if (!r[3] && !r[4]) return;
-        console.log(`\n--- [No.${idx + 1}] 状態:${r[1]} | 日付:${r[3]} | 拠点:${r[4]} | 不在:${r[5]} | 科:${r[6]} ---`);
-        console.log(`  種別: ${r[7]} | 医師: ${r[8].replace(/\n/g, "・")} | 現在シフト: ${r[9]} -> 相談シフト: ${r[10]}`);
-        console.log(`  時給区分: ${r[11]} | 現在日給: ${r[12]}円 | 相談日給: ${r[13]}円 | 依頼手当: ${r[14]}円 | 担当: ${r[15]}`);
+        console.log(`\n--- [No.${idx + 1}] 状態:${r[1]} | 日付:${r[3].replace(/\n/g, ",")} | 拠点:${r[4].replace(/\n/g, ",")} | 医師:${r[8].replace(/\n/g, "・")} ---`);
+        console.log(`  時給区分: ${r[11]} | 相談日給: ${r[13].replace(/\n/g, "/")} | 担当: ${r[15]}`);
         console.log(`  作業メモ案: ${r[17]}`);
-        console.log(`  根拠: ${r[21].replace(/\n/g, " / ")}`);
         if (r[16]) {
           console.log(`  【送信文案】:\n${r[16]}`);
-        } else {
-          console.log(`  【送信文案】: (作成なし)`);
         }
       });
     } else {
@@ -413,21 +398,6 @@ function inspectCurrentOutput() {
     }
   };
 
-  dumpReviewType("■ 1-A. オフライン修正シート（全件・全文出力）", offlineSheet);
-  dumpReviewType("■ 1-B. 文案・Slack投稿レビュー（全件・全文出力）", revSheet);
-
-  console.log("\n==================================================");
-  console.log("■ 2. 確認リスト（全件出力）");
-  console.log("==================================================");
-  if (confSheet && confSheet.getLastRow() >= 2) {
-    const cRows = confSheet.getRange(2, 1, confSheet.getLastRow() - 1, 11).getDisplayValues();
-    cRows.forEach((r, idx) => {
-      if (!r[1] && !r[2]) return;
-      console.log(
-        `[確認${idx + 1}] 日付:${r[1]} | 音声:${r[2]} -> 補正:${r[3]}(${r[4]}) | 時間:${r[5]} | 種別:${r[6]} | 医師:${r[7]} | 突合:${r[8]} | 理由:${r[9]} | 発言:${r[10]}`
-      );
-    });
-  } else {
-    console.log("データがありません");
-  }
+  dumpReviewType("■ 1-A. オフライン修正シート", offlineSheet);
+  dumpReviewType("■ 1-B. 文案・Slack投稿レビュー", revSheet);
 }
