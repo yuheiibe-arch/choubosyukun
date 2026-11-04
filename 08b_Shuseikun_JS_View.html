@@ -11,6 +11,7 @@
     doctorMaster: [],
     wageTables: {},
     selectedIdx: -1,
+    customItem: null,
     area: "関東",
     dept: "小児科",
     approachType: "勤務地変更相談"
@@ -25,6 +26,116 @@
 
   function normalizeKanaKeJS_(name) {
     return stripClinicPrefix_(name).replace(/ヶ/g, "ケ").replace(/が丘/g, "ヶ丘");
+  }
+
+  function toSlashDateJS_(val) {
+    var s = String(val || "").trim();
+    if (!s) return "";
+    var m = s.match(/(\d{4})[\/\-年\.]\s*(\d{1,2})[\/\-月\.]\s*(\d{1,2})/);
+    if (!m) return "";
+    return m[1] + "/" + ("0" + m[2]).slice(-2) + "/" + ("0" + m[3]).slice(-2);
+  }
+
+  function toDashDateJS_(val) {
+    var slash = toSlashDateJS_(val);
+    return slash ? slash.replace(/\//g, "-") : "";
+  }
+
+  function getDefaultTargetDateStr_() {
+    var d6Dates = (STATE.d6Data || [])
+      .map(function(d) { return d.dateStr; })
+      .filter(Boolean)
+      .sort();
+    if (d6Dates.length > 0) return d6Dates[0];
+    var now = new Date();
+    return now.getFullYear() + "/" + ("0" + (now.getMonth() + 1)).slice(-2) + "/" + ("0" + now.getDate()).slice(-2);
+  }
+
+  /**
+   * 選択中の確認リスト項目、または新規作成モードの仮想項目を返す（nullにならないため全関数が動作する）
+   */
+  function getActiveItemOrCustom_() {
+    if (STATE.selectedIdx >= 0 && STATE.selectedIdx < STATE.confirmItems.length) {
+      return STATE.confirmItems[STATE.selectedIdx];
+    }
+    if (!STATE.customItem) {
+      var defDate = toSlashDateJS_(document.getElementById("targetDateInput") ? document.getElementById("targetDateInput").value : "") || getDefaultTargetDateStr_();
+      STATE.customItem = {
+        isCustomNew: true,
+        sheetRow: 0,
+        dateStr: defDate,
+        rawClinicName: "",
+        origRawClinicName: "",
+        guessedClinic: "",
+        dept: STATE.dept || "小児科",
+        targetTime: "15:00-18:00",
+        approachType: STATE.approachType || "勤務地変更相談",
+        extractedDoctor: "",
+        evidence: "修正くんから新規作成",
+        staffName: ""
+      };
+    }
+    return STATE.customItem;
+  }
+
+  function syncDateUI_(dateStrSlash) {
+    var normSlash = toSlashDateJS_(dateStrSlash) || getDefaultTargetDateStr_();
+    var dash = toDashDateJS_(normSlash);
+    var dateInp = document.getElementById("targetDateInput");
+    if (dateInp && dateInp.value !== dash) dateInp.value = dash;
+
+    var quickSel = document.getElementById("d6DateQuickSelect");
+    if (quickSel) {
+      var found = false;
+      for (var i = 0; i < quickSel.options.length; i++) {
+        if (quickSel.options[i].value === normSlash) {
+          quickSel.selectedIndex = i;
+          found = true;
+          break;
+        }
+      }
+      if (!found) quickSel.selectedIndex = 0;
+    }
+
+    var badge = document.getElementById("selectedDateBadge");
+    if (badge) badge.innerText = normSlash;
+  }
+
+  function populateD6DateQuickSelect_() {
+    var quickSel = document.getElementById("d6DateQuickSelect");
+    if (!quickSel) return;
+    quickSel.innerHTML = '<option value="">（D6募集日一覧から選択）</option>';
+
+    var countByDate = {};
+    (STATE.d6Data || []).forEach(function(d) {
+      if (!d.dateStr) return;
+      countByDate[d.dateStr] = (countByDate[d.dateStr] || 0) + 1;
+    });
+
+    var dates = Object.keys(countByDate).sort();
+    var days = ["日", "月", "火", "水", "木", "金", "土"];
+    dates.forEach(function(dt) {
+      var p = dt.split("/");
+      var dObj = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+      var dow = days[dObj.getDay()];
+      var opt = document.createElement("option");
+      opt.value = dt;
+      opt.textContent = dt + " (" + dow + ") - 募集 " + countByDate[dt] + "枠";
+      quickSel.appendChild(opt);
+    });
+  }
+
+  function onTargetDateChanged(newVal) {
+    var slash = toSlashDateJS_(newVal);
+    if (!slash) return;
+    var item = getActiveItemOrCustom_();
+    item.dateStr = slash;
+    syncDateUI_(slash);
+
+    var curClinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
+    populateClinicSelectByArea_(curClinic);
+    filterDoctorCandidates(false);
+    onClinicOrDeptChange();
   }
 
   function normalizeApproachTypeJS_(rawType, evidenceText) {
@@ -44,9 +155,6 @@
     return "勤務地変更相談";
   }
 
-  /**
-   * 『拠点名』シート（A列：拠点名、H列：エリア）から動的に読み込んだマップのみでエリアを判定する
-   */
   function getClinicAreaJS_(clinicName) {
     var clean = stripClinicPrefix_(clinicName);
     if (!clean) return "";
@@ -66,9 +174,6 @@
     return "";
   }
 
-  /**
-   * 対象日（dateStr）がその拠点の開院日以降かを判定する（開院前は false で候補から除外）
-   */
   function isClinicOpenOnDateJS_(clinicName, dateStr) {
     var clean = stripClinicPrefix_(clinicName);
     if (!clean || !dateStr) return true;
@@ -94,9 +199,6 @@
     return true;
   }
 
-  /**
-   * 時給シートのデータから、その拠点に「内科」が存在するかを動的に判定する
-   */
   function clinicHasInternalMedicineJS_(clinicName) {
     var clean = stripClinicPrefix_(clinicName);
     if (!clean) return false;
@@ -142,21 +244,34 @@
       stSel.appendChild(opt);
     });
 
+    populateD6DateQuickSelect_();
     renderLeftList();
+
     if (STATE.confirmItems.length > 0) {
       selectConfirmItem(0);
       document.getElementById("headerStatus").innerText = "残り " + STATE.confirmItems.length + "件";
     } else {
-      document.getElementById("headerStatus").innerText = "確認リストは0件です";
-      document.getElementById("leftItemList").innerHTML = "<div style='padding:12px;font-weight:bold;'>🎉 現在、確認リストに残っている項目はありません。</div>";
+      startNewCustomEntry();
+      document.getElementById("headerStatus").innerText = "✨ 新規作成モード（確認リスト0件）";
     }
   }
 
   function renderLeftList() {
     var box = document.getElementById("leftItemList");
     document.getElementById("remainCount").innerText = STATE.confirmItems.length + "件";
+
+    var newBtn = document.getElementById("newCustomEntryBtn");
+    if (newBtn) {
+      newBtn.className = "btn-new-entry" + (STATE.selectedIdx === -1 ? " active-mode" : "");
+    }
+
+    var discardBtn = document.getElementById("discardBtn");
+    if (discardBtn) {
+      discardBtn.style.display = (STATE.selectedIdx === -1) ? "none" : "block";
+    }
+
     if (STATE.confirmItems.length === 0) {
-      box.innerHTML = "<div style='padding:10px;'>すべて処理完了しました！</div>";
+      box.innerHTML = "<div style='padding:10px;font-weight:bold;color:#2e5cb8;'>🎉 確認リストは0件です。<br><br>中央・右パネルから<b>新規で打診枠を作成してレビュー表へ追加</b>できます！</div>";
       return;
     }
     box.innerHTML = "";
@@ -182,6 +297,48 @@
     });
   }
 
+  /**
+   * ➕ 新規作成モードを開始する（確認リストにない枠を手動作成してレビュー表へ差し込むモード）
+   */
+  function startNewCustomEntry() {
+    STATE.selectedIdx = -1;
+    var currentInputDate = toSlashDateJS_(document.getElementById("targetDateInput") ? document.getElementById("targetDateInput").value : "");
+    var initialDate = currentInputDate || getDefaultTargetDateStr_();
+
+    STATE.customItem = {
+      isCustomNew: true,
+      sheetRow: 0,
+      dateStr: initialDate,
+      rawClinicName: "",
+      origRawClinicName: "",
+      guessedClinic: "",
+      dept: STATE.dept || "小児科",
+      targetTime: document.getElementById("absenceTimeInput").value || "15:00-18:00",
+      approachType: STATE.approachType || "勤務地変更相談",
+      extractedDoctor: document.getElementById("doctorInput").value || "",
+      evidence: "修正くんから新規作成",
+      staffName: document.getElementById("staffSelect").value || ""
+    };
+
+    renderLeftList();
+    syncDateUI_(initialDate);
+
+    document.getElementById("evidenceBox").innerHTML =
+      "✨ <b>【新規作成モード】</b> 対象日付・拠点・医師を選択して「⭕ OK」を押すと、レビュー表へ直接追加されます。";
+
+    var curClinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
+    setAreaToggle(STATE.area || "関東", curClinic, true);
+    if (!document.getElementById("absenceTimeInput").value) {
+      document.getElementById("absenceTimeInput").value = "15:00-18:00";
+    }
+    if (!document.getElementById("consultTimeInput").value) {
+      document.getElementById("consultTimeInput").value = document.getElementById("absenceTimeInput").value;
+    }
+
+    filterDoctorCandidates(false);
+    onClinicOrDeptChange();
+  }
+
   function setAreaToggle(area, preferredClinic, skipRecalc) {
     STATE.area = (area === "関西") ? "関西" : "関東";
     document.getElementById("areaKantoBtn").className = "gb-btn" + (STATE.area === "関東" ? " selected" : "");
@@ -196,7 +353,7 @@
   }
 
   function populateClinicSelectByArea_(preferredClinic) {
-    var item = STATE.confirmItems[STATE.selectedIdx];
+    var item = getActiveItemOrCustom_();
     var dateStr = item ? item.dateStr : "";
     var cSel = document.getElementById("clinicSelect");
     cSel.innerHTML = "";
@@ -260,12 +417,17 @@
   }
 
   function selectConfirmItem(idx) {
-    if (idx < 0 || idx >= STATE.confirmItems.length) return;
+    if (idx < 0 || idx >= STATE.confirmItems.length) {
+      startNewCustomEntry();
+      return;
+    }
     STATE.selectedIdx = idx;
     renderLeftList();
 
     var item = STATE.confirmItems[idx];
-    document.getElementById("selectedDateBadge").innerText = item.dateStr || "-";
+    if (!item.dateStr) item.dateStr = getDefaultTargetDateStr_();
+    syncDateUI_(item.dateStr);
+
     document.getElementById("evidenceBox").innerHTML =
       "<b>【MTG発言】</b>" + (item.evidence || "（発言抜粋なし）");
 
@@ -329,18 +491,23 @@
     if (!skipRecalc) recalcAll();
   }
 
+  function onDoctorInputTyped() {
+    filterDoctorCandidates(false);
+    rebuildDraftPreview();
+  }
+
   function clearDoctorInput() {
     document.getElementById("doctorInput").value = "";
     document.getElementById("fromClinicInput").value = "";
     document.getElementById("currentTimeInput").value = "";
-    filterDoctorCandidates();
+    filterDoctorCandidates(false);
     recalcAll();
   }
 
   function filterDoctorCandidates(autoPickIfSingle) {
     var query = (document.getElementById("doctorInput").value || "").trim();
     var box = document.getElementById("docCandidatesBox");
-    var item = STATE.confirmItems[STATE.selectedIdx];
+    var item = getActiveItemOrCustom_();
     var dateStr = item ? item.dateStr : "";
 
     var targetClinic = stripClinicPrefix_(document.getElementById("clinicSelect").value);
@@ -425,7 +592,6 @@
       document.getElementById("fromClinicInput").value = shiftClinic;
       document.getElementById("currentTimeInput").value = shiftObj.startTime + "-" + shiftObj.endTime;
 
-      // 手動クリック時のみ、当日シフト拠点と対象拠点が異なれば「勤務地変更相談」へ自動調整（初期表示時は確認リストの指定種別を優先）
       if (!isAutoInit && shiftClinic && targetClinic && normalizeKanaKeJS_(shiftClinic) !== normalizeKanaKeJS_(targetClinic)) {
         if (STATE.approachType === "延長相談" || STATE.approachType === "早出相談") {
           setApproach("勤務地変更相談", true);

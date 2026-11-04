@@ -361,12 +361,13 @@ function insertReviewRowSortedByDate_(revSheet, newRow, numCols) {
 
 /**
  * 修正くんから「⭕ OK（文案・Slackレビューへ移す）」が押されたときのメイン処理
+ * - 新規作成モード（isCustomNew / sheetRow <= 0）時は確認リストの行削除をスキップ
  * - 個別アプローチ時は確実に勤務くんスキャン＆候補抽出を回し、進捗をトースト表示
  * - 日付順（同日内は開始時刻順）でレビューシートへ挿入
- * - 確認リストの最後の1行（2行目）でもエラーにならず確実に削除・クリア
  */
 function commitShuseikunItemToReview(payload) {
   var d7Ss = SpreadsheetApp.getActiveSpreadsheet();
+  var isCustomNew = Boolean(payload.isCustomNew || !payload.sheetRow || Number(payload.sheetRow) <= 0);
   d7Ss.toast("① 修正くんの入力データを受け取りました...", "🕹️ 修正くん転送中", 10);
 
   var revSheet = d7Ss.getSheetByName(SHEET_NAMES.D7_REVIEW);
@@ -400,21 +401,26 @@ function commitShuseikunItemToReview(payload) {
   var requestAllowance = Number(payload.requestAllowance || 0);
   var staffName = extractCleanStaffName_(payload.staffName || "");
   var draftMessage = normalizeDraftMessageFormat_(payload.draftMessage || "", staffName);
-  var evidence = String(payload.evidence || "");
+  var evidence = String(payload.evidence || (isCustomNew ? "修正くんから新規作成" : ""));
 
   var isAutoExtractIndividual = (approachType === "個別アプローチ") && !doctorName;
   var targetDocForMemo = isAutoExtractIndividual ? "候補医師抽出対象" : doctorName;
-  var naturalMemo = isAutoExtractIndividual
-    ? "候補医師抽出対象に個別アプローチ交渉"
-    : buildNaturalWorkMemo_(approachType, targetDocForMemo, fromClinic);
+  var naturalMemo = payload.customMemo
+    ? String(payload.customMemo).trim()
+    : (isAutoExtractIndividual
+        ? "候補医師抽出対象に個別アプローチ交渉"
+        : buildNaturalWorkMemo_(approachType, targetDocForMemo, fromClinic));
 
   var threadTitle = buildSlackThreadTitle_(dateStr);
   var mdShort = formatSlackDateHeader_(dateStr);
   var slackBody = "`" + mdShort + "`\n```\n【" + d6ClinicKey + "】" + absenceTime + (isSpecial ? "【特別時給】" : "") + "\n・" + naturalMemo + "\n```";
-  var evidenceFull = "[修正くん補正済]\n[MTG発言] " + evidence;
+  var evidenceFull = isCustomNew
+    ? "[修正くん新規作成]\n" + evidence
+    : "[修正くん補正済]\n[MTG発言] " + evidence;
+  var sourceNoteLabel = isCustomNew ? "修正くん新規作成" : "修正くんから移動";
 
   var newRow = [
-    false, "未レビュー", "修正くんから移動", dateStr, d6ClinicKey,
+    false, "未レビュー", sourceNoteLabel, dateStr, d6ClinicKey,
     absenceTime, dept, approachType, doctorName, currentShiftLabel,
     consultShiftLabel, isSpecial ? "特別時給" : "通常時給",
     currentDailyWage || "", consultDailyWage || "", requestAllowance || "",
@@ -424,7 +430,6 @@ function commitShuseikunItemToReview(payload) {
 
   var extractedCount = doctorName ? 1 : 0;
 
-  // ★個別アプローチで医師名が未指定の場合は、過去実績・同曜日・除外条件・打診履歴から候補医師を自動抽出する
   if (isAutoExtractIndividual && clinicName && typeof populateIndividualApproachCandidates_ === "function") {
     try {
       d7Ss.toast(
@@ -441,7 +446,6 @@ function commitShuseikunItemToReview(payload) {
       var d3Data = loadD3PastedShifts_(unfilledSs.getSheetByName(SHEET_NAMES.D3_PASTED));
       var holidaySet = loadHolidaySet_(d7Ss.getSheetByName(SHEET_NAMES.D7_HOLIDAY));
 
-      // 既存のレビューシート行も一時配列に含めて同日重複打診を除外できるようにする
       var tempReviewRows = [newRow];
       if (revSheet && revSheet.getLastRow() >= 2) {
         var firstCellCheck = String(revSheet.getRange(2, 4).getDisplayValue() || "").trim();
@@ -529,7 +533,6 @@ function commitShuseikunItemToReview(payload) {
     );
   }
 
-  // ★日付順（同日内は開始時刻順）の正しい行位置に挿入する
   var addedRowNum = insertReviewRowSortedByDate_(revSheet, newRow, 24);
   revSheet.getRange(addedRowNum, 1).insertCheckboxes();
 
@@ -554,12 +557,15 @@ function commitShuseikunItemToReview(payload) {
   revSheet.getRange(addedRowNum, 20).setDataValidation(postTypeRule);
   applyLeftMiddleToSheet_(revSheet);
 
-  // ★確認リストから該当行を安全に削除（最後の1行＝2行目でもエラーにならない）
-  deleteConfirmRowByMatch_(confSheet, payload.sheetRow, dateStr, payload.origRawClinicName || payload.rawClinicName, evidence);
+  // ★確認リストからの移動時のみ、確認リストの該当行を削除する（新規作成時は絶対に消さない）
+  if (!isCustomNew) {
+    deleteConfirmRowByMatch_(confSheet, payload.sheetRow, dateStr, payload.origRawClinicName || payload.rawClinicName, evidence);
+  }
 
   if (logSheet) {
     var nowStr = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd HH:mm");
-    appendRowAndTrimBlank_(logSheet, [nowStr, "修正くん移動", "-", dateStr + " " + d6ClinicKey, 1, newRow[17]], 6);
+    var logType = isCustomNew ? "修正くん新規追加" : "修正くん移動";
+    appendRowAndTrimBlank_(logSheet, [nowStr, logType, "-", dateStr + " " + d6ClinicKey, 1, newRow[17]], 6);
   }
 
   SpreadsheetApp.flush();
@@ -571,6 +577,7 @@ function commitShuseikunItemToReview(payload) {
 
   return {
     ok: true,
+    isCustomNew: isCustomNew,
     addedRowNum: addedRowNum,
     approachType: approachType,
     extractedCount: extractedCount

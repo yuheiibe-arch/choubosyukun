@@ -1,54 +1,58 @@
 <script>
   /**
-   * 勤務地変更相談時に「第2・第3候補拠点」を追加選択できるUIを動的にマウントする
+   * 勤務地変更相談時に「第2・第3候補拠点」をグリッド下の全幅エリアに横1列でスッキリ表示する
    */
   function ensureExtraTargetClinicsUI_() {
     var clinicSel = document.getElementById("clinicSelect");
-    if (!clinicSel) return;
+    var mountPoint = document.getElementById("extraClinicsMountPoint") || (clinicSel ? clinicSel.parentNode : null);
+    if (!clinicSel || !mountPoint) return;
 
     var container = document.getElementById("extraClinicsContainer");
     if (!container) {
       container = document.createElement("div");
       container.id = "extraClinicsContainer";
-      container.style.marginTop = "6px";
-      container.style.padding = "6px 8px";
-      container.style.background = "#f8fafc";
-      container.style.border = "1px dashed #cbd5e1";
-      container.style.borderRadius = "6px";
-      container.style.fontSize = "12px";
+      container.style.marginTop = "5px";
+      container.style.padding = "4px 8px";
+      container.style.background = "#eef4fa";
+      container.style.border = "1px dashed #94a3b8";
+      container.style.borderRadius = "5px";
+      container.style.fontSize = "11px";
 
       var html = [
-        '<div style="font-weight:bold;color:#334155;margin-bottom:4px;">📍 複数拠点の同時打診（ご相談①・②並記用・任意）</div>',
-        '<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px;">',
-        '  <span style="min-width:52px;color:#475569;">第2候補:</span>',
-        '  <select id="extraClinic2Select" style="flex:1;padding:3px;" onchange="rebuildDraftPreview()"><option value="">（なし）</option></select>',
-        '  <label style="white-space:nowrap;cursor:pointer;"><input type="checkbox" id="extraClinic2SpCheck" onchange="rebuildDraftPreview()">特時</label>',
-        '</div>',
-        '<div style="display:flex;gap:6px;align-items:center;">',
-        '  <span style="min-width:52px;color:#475569;">第3候補:</span>',
-        '  <select id="extraClinic3Select" style="flex:1;padding:3px;" onchange="rebuildDraftPreview()"><option value="">（なし）</option></select>',
-        '  <label style="white-space:nowrap;cursor:pointer;"><input type="checkbox" id="extraClinic3SpCheck" onchange="rebuildDraftPreview()">特時</label>',
+        '<div style="display:flex; align-items:center; gap:8px; flex-wrap:nowrap;">',
+        '  <span style="font-weight:bold; color:#1e3a8a; white-space:nowrap;">📍 同時打診(任意):</span>',
+        '  <span style="color:#475569; white-space:nowrap;">②</span>',
+        '  <select id="extraClinic2Select" style="flex:1; height:24px; padding:1px 4px; font-size:11px;" onchange="rebuildDraftPreview()"><option value="">（第2候補なし）</option></select>',
+        '  <label style="white-space:nowrap; cursor:pointer; display:flex; align-items:center; gap:2px;"><input type="checkbox" id="extraClinic2SpCheck" onchange="rebuildDraftPreview()">特時</label>',
+        '  <span style="color:#475569; white-space:nowrap; margin-left:4px;">③</span>',
+        '  <select id="extraClinic3Select" style="flex:1; height:24px; padding:1px 4px; font-size:11px;" onchange="rebuildDraftPreview()"><option value="">（第3候補なし）</option></select>',
+        '  <label style="white-space:nowrap; cursor:pointer; display:flex; align-items:center; gap:2px;"><input type="checkbox" id="extraClinic3SpCheck" onchange="rebuildDraftPreview()">特時</label>',
         '</div>'
       ].join("");
       container.innerHTML = html;
-      clinicSel.parentNode.appendChild(container);
-
-      var fillOptions = function(selId) {
-        var sel = document.getElementById(selId);
-        if (!sel) return;
-        for (var i = 0; i < clinicSel.options.length; i++) {
-          var optVal = clinicSel.options[i].value;
-          var optTxt = clinicSel.options[i].text;
-          if (!optVal || optVal === "要確認") continue;
-          var o = document.createElement("option");
-          o.value = optVal;
-          o.text = optTxt;
-          sel.appendChild(o);
-        }
-      };
-      fillOptions("extraClinic2Select");
-      fillOptions("extraClinic3Select");
+      mountPoint.appendChild(container);
     }
+
+    // 拠点セレクトの選択肢が変わった時にも第2・第3候補の選択肢を同期する
+    var syncOptions = function(selId) {
+      var sel = document.getElementById(selId);
+      if (!sel) return;
+      var prevVal = sel.value;
+      var defaultLabel = (selId === "extraClinic2Select") ? "（第2候補なし）" : "（第3候補なし）";
+      sel.innerHTML = '<option value="">' + defaultLabel + '</option>';
+      for (var i = 0; i < clinicSel.options.length; i++) {
+        var optVal = clinicSel.options[i].value;
+        var optTxt = clinicSel.options[i].text;
+        if (!optVal || optVal === "要確認") continue;
+        var o = document.createElement("option");
+        o.value = optVal;
+        o.text = optTxt.replace("（当日募集枠あり）", "");
+        sel.appendChild(o);
+      }
+      if (prevVal) sel.value = prevVal;
+    };
+    syncOptions("extraClinic2Select");
+    syncOptions("extraClinic3Select");
 
     container.style.display = (STATE.approachType === "勤務地変更相談") ? "block" : "none";
   }
@@ -85,12 +89,12 @@
   }
 
   function rebuildDraftPreview() {
-    var item = STATE.confirmItems[STATE.selectedIdx];
+    var item = getActiveItemOrCustom_();
     if (!item) return;
 
     ensureExtraTargetClinicsUI_();
 
-    var dateStr = item.dateStr || "2026/10/25";
+    var dateStr = item.dateStr || getDefaultTargetDateStr_();
     var p = dateStr.split("/");
     var dObj = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
     var days = ["日", "月", "火", "水", "木", "金", "土"];
@@ -235,6 +239,20 @@
     document.getElementById("memoPreview").value = memo;
   }
 
+  function extractDateFromDraftTextFallback_(draftText, defaultDateStr) {
+    var s = String(draftText || "");
+    var mFull = s.match(/(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日/);
+    if (mFull) {
+      return mFull[1] + "/" + ("0" + mFull[2]).slice(-2) + "/" + ("0" + mFull[3]).slice(-2);
+    }
+    var mMd = s.match(/[■・]\s*(\d{1,2})月\s*(\d{1,2})日/);
+    if (mMd) {
+      var year = (defaultDateStr && defaultDateStr.split("/")[0]) || new Date().getFullYear();
+      return year + "/" + ("0" + mMd[1]).slice(-2) + "/" + ("0" + mMd[2]).slice(-2);
+    }
+    return defaultDateStr;
+  }
+
   function adjustRemainingSheetRowsAfterDelete_(deletedSheetRow) {
     if (!deletedSheetRow) return;
     STATE.confirmItems.forEach(function(it) {
@@ -245,8 +263,18 @@
   }
 
   function commitCurrentItem() {
-    var item = STATE.confirmItems[STATE.selectedIdx];
+    var item = getActiveItemOrCustom_();
     if (!item) return;
+
+    var isCustomNew = Boolean(item.isCustomNew || STATE.selectedIdx === -1);
+    var draftText = document.getElementById("draftPreview").value || "";
+    var dateFromInput = toSlashDateJS_(document.getElementById("targetDateInput").value) || item.dateStr;
+    var effectiveDateStr = extractDateFromDraftTextFallback_(draftText, dateFromInput);
+
+    if (!effectiveDateStr) {
+      alert("📅 対象日付を選択してください。");
+      return;
+    }
 
     var btn = document.getElementById("commitBtn");
     var headerBadge = document.getElementById("headerStatus");
@@ -278,15 +306,16 @@
         btn.innerText = steps[stepIdx];
       }, 2000);
     } else {
-      btn.innerText = "⏳ レビュー表へ移動中...";
+      btn.innerText = "⏳ レビュー表へ転送中...";
       headerBadge.innerText = "レビュー表へ転送中...";
     }
 
     var payload = {
-      sheetRow: item.sheetRow,
-      dateStr: item.dateStr,
-      origRawClinicName: item.origRawClinicName || item.rawClinicName,
-      rawClinicName: item.rawClinicName,
+      isCustomNew: isCustomNew,
+      sheetRow: isCustomNew ? 0 : item.sheetRow,
+      dateStr: effectiveDateStr,
+      origRawClinicName: item.origRawClinicName || item.rawClinicName || clinic,
+      rawClinicName: item.rawClinicName || clinic,
       clinicName: clinic,
       dept: dept,
       absenceTime: document.getElementById("absenceTimeInput").value,
@@ -300,11 +329,12 @@
       consultDailyWage: document.getElementById("consultDailyWageInput").value,
       requestAllowance: document.getElementById("allowanceInput").value,
       staffName: normalizeStaffSurnameJS_(document.getElementById("staffSelect").value),
-      draftMessage: document.getElementById("draftPreview").value,
-      evidence: item.evidence
+      draftMessage: draftText,
+      customMemo: document.getElementById("memoPreview").value,
+      evidence: item.evidence || "修正くんから新規作成"
     };
 
-    var removedSheetRow = item.sheetRow;
+    var removedSheetRow = isCustomNew ? 0 : item.sheetRow;
 
     google.script.run
       .withSuccessHandler(function(res) {
@@ -312,25 +342,31 @@
         btn.disabled = false;
         btn.innerText = "⭕ OK（文案・Slackレビューへ移す）";
 
-        // 第2・第3候補の選択状態をリセット
         if (document.getElementById("extraClinic2Select")) document.getElementById("extraClinic2Select").value = "";
         if (document.getElementById("extraClinic3Select")) document.getElementById("extraClinic3Select").value = "";
 
-        STATE.confirmItems.splice(STATE.selectedIdx, 1);
-        adjustRemainingSheetRowsAfterDelete_(removedSheetRow);
-
-        var doneNotice = (res && res.approachType === "個別アプローチ")
+        var doneNotice = (res && res.approachType === "個別アプローチ" && !rawDocInput)
           ? "✅ 候補" + (res.extractedCount || 0) + "名を抽出して" + (res.addedRowNum || "") + "行目へ挿入完了"
-          : "✅ レビュー表" + (res && res.addedRowNum ? (res.addedRowNum + "行目") : "") + "へ転送完了";
+          : "✅ レビュー表" + (res && res.addedRowNum ? (res.addedRowNum + "行目") : "") + "へ追加完了";
 
-        if (STATE.confirmItems.length > 0) {
+        if (!isCustomNew) {
+          STATE.confirmItems.splice(STATE.selectedIdx, 1);
+          adjustRemainingSheetRowsAfterDelete_(removedSheetRow);
+        } else {
+          document.getElementById("doctorInput").value = "";
+          document.getElementById("fromClinicInput").value = "";
+          document.getElementById("currentTimeInput").value = "";
+          recalcAll();
+        }
+
+        if (STATE.confirmItems.length > 0 && !isCustomNew) {
           headerBadge.innerText = doneNotice + " (残り" + STATE.confirmItems.length + "件)";
           selectConfirmItem(Math.min(STATE.selectedIdx, STATE.confirmItems.length - 1));
         } else {
-          headerBadge.innerText = "確認リストは0件です";
+          headerBadge.innerText = doneNotice;
           renderLeftList();
           document.getElementById("evidenceBox").innerHTML =
-            "🎉 <b>すべての確認リスト項目を移動しました！</b><br>" + doneNotice + "<br>右上の「×」で閉じてください。";
+            "🎉 <b>" + doneNotice + "！</b> 続けて新規作成するか、右上の「×」で閉じてください。";
         }
       })
       .withFailureHandler(function(err) {
@@ -344,6 +380,7 @@
   }
 
   function discardCurrentItem() {
+    if (STATE.selectedIdx === -1) return;
     var item = STATE.confirmItems[STATE.selectedIdx];
     if (!item) return;
     if (!confirm("この行を確認リストから削除しますか？")) return;
@@ -359,8 +396,7 @@
         if (STATE.confirmItems.length > 0) {
           selectConfirmItem(Math.min(STATE.selectedIdx, STATE.confirmItems.length - 1));
         } else {
-          renderLeftList();
-          document.getElementById("evidenceBox").innerText = "🎉 確認リストはすべて空になりました。右上の「×」で閉じてください。";
+          startNewCustomEntry();
         }
       })
       .withFailureHandler(function(err) {

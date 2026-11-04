@@ -82,8 +82,8 @@
   }
 
   function getDayCategoryInfo_(dateStr) {
-    var ym = String(dateStr || "2026/10/25").split("/");
-    var y = Number(ym[0] || 2026), m = Number(ym[1] || 10), d = Number(ym[2] || 1);
+    var ym = String(dateStr || "2026/11/01").split("/");
+    var y = Number(ym[0] || 2026), m = Number(ym[1] || 11), d = Number(ym[2] || 1);
     var dObj = new Date(y, m - 1, d);
     var dow = dObj.getDay();
     var dayCat = (STATE.holidays.has(dateStr) || dow === 0) ? "sunHol" : (dow === 6 ? "sat" : "weekday");
@@ -134,7 +134,7 @@
   }
 
   function onClinicOrDeptChange() {
-    var item = STATE.confirmItems[STATE.selectedIdx];
+    var item = getActiveItemOrCustom_();
     if (!item) return;
 
     updateDeptButtonsByClinic_();
@@ -158,7 +158,6 @@
         document.getElementById("absenceTimeInput").value = d6Hit.absenceTime;
       }
       if (STATE.approachType === "勤務地変更相談" && document.getElementById("currentTimeInput").value) {
-        // 勤務地変更相談時は特段の指定がない限り現在シフト（例:09:00-21:00）をまるごと移動として引き継ぐ
         document.getElementById("consultTimeInput").value = document.getElementById("currentTimeInput").value;
       } else if (d6Hit.absenceTime && !document.getElementById("currentTimeInput").value) {
         document.getElementById("consultTimeInput").value = d6Hit.absenceTime;
@@ -210,10 +209,6 @@
     return Math.round(total);
   }
 
-  /**
-   * 勤務地変更相談（移動）専用の日給計算：
-   * 15分刻みで「移動元の通常時給」と「移動先の時給（特別時給枠なら+2,000円した後）」を比較し、高い方を採用する
-   */
   function calcMoverIntervalYenJS_(rangeStr, originRates, isFromKita, targetRates, isTargetKita, spRangeStr, spBonus) {
     if (!rangeStr || rangeStr.indexOf("-") === -1 || !targetRates) return 0;
     var parts = rangeStr.split("-");
@@ -244,14 +239,13 @@
   }
 
   function recalcAll() {
-    var item = STATE.confirmItems[STATE.selectedIdx];
+    var item = getActiveItemOrCustom_();
     if (!item) return;
 
     if (typeof ensureExtraTargetClinicsUI_ === "function") {
       ensureExtraTargetClinicsUI_();
     }
 
-    // 勤務地変更相談で現在シフトがあり、相談時間が未設定（または単一コマのみ）なら現在シフト（まるごと移動）をセット
     var curTimeVal = document.getElementById("currentTimeInput").value;
     var conTimeEl = document.getElementById("consultTimeInput");
     if (STATE.approachType === "勤務地変更相談" && curTimeVal && !conTimeEl.value) {
@@ -272,7 +266,6 @@
 
     if (targetFound && targetFound.row && targetFound.row[info.dayCat]) {
       var r = targetFound.row[info.dayCat];
-      // 時給入力欄には移動先拠点の基本時給をセット（比較はcalcMoverIntervalYenJS_側で特時加算後に行う）
       document.getElementById("rateAmInput").value = r.am;
       document.getElementById("ratePmInput").value = r.pm;
       document.getElementById("rateNightInput").value = r.night;
@@ -287,7 +280,7 @@
   }
 
   function recalcFromHourlyInputs() {
-    var item = STATE.confirmItems[STATE.selectedIdx];
+    var item = getActiveItemOrCustom_();
     if (!item) return;
 
     var dateStr = item.dateStr;
