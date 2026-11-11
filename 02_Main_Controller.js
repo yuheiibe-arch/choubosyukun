@@ -183,9 +183,23 @@ function runJsonImportCore_(isOfflineDocMode) {
     let dept = (item.department || "小児科").trim();
     let targetTime = normalizeTimeRange_(item.target_time || "");
     let approachType = (item.approach_type || "").trim();
-    let rawDocName = (item.target_doctor || "").replace(/先生$/g, "").trim();
+    let rawDocName = String(item.target_doctor || "")
+      .replace(/\r\n|\r/g, "\n")
+      .split("\n")[0]
+      .replace(/(?:→|⇒|⇨).*$/g, "")
+      .replace(/^(?:【?案\s*[123１２３]?】?\s*)+/g, "")
+      .replace(/(?:[\s\u3000]*(?:他|ほか|外)\s*\d+\s*名.*$)/g, "")
+      .replace(/先生$/g, "")
+      .trim();
+
     const itemLicenseNo = String(item.license_no || "").trim();
     let rawAssignee = (item.assignee || "").trim();
+
+    // ★「バックアップ医師」等の汎用プレースホルダーは個人名として扱わない（後続のD3/確定シフトのバックアップ待機医師検索へ委ねる）
+    if (/^(?:バックアップ医師|関東バックアップ|関西バックアップ|バックアップ)$/.test(rawDocName)) {
+      if (!approachType) approachType = "バックアップ勤務依頼";
+      rawDocName = "";
+    }
 
     if (itemLicenseNo) {
       rawDocName = resolveExactDocNameByLicenseNo_(itemLicenseNo, rawDocName, dateStr, d3Data);
@@ -211,7 +225,15 @@ function runJsonImportCore_(isOfflineDocMode) {
       approachType = "個別アプローチ";
     }
 
-    if (approachType === "募集継続・ステイ" || approachType === "ステイ") {
+    // ★ステイ・充足・破損断片は文案不要のためスキップ
+    if (
+      approachType === "募集継続・ステイ" ||
+      approachType === "ステイ" ||
+      /^(?:ステイ|募集継続・ステイ|特別時給.*ステイ|充足|応募あり充足)/.test(rawDocName)
+    ) {
+      continue;
+    }
+    if (rawDocName && (/[\(\)（）⭕❌📩⚠️]|000円|^両方|要確認|返信待ち|辞退|承諾/.test(rawDocName) || /^\d+$/.test(rawDocName))) {
       continue;
     }
 
@@ -246,7 +268,7 @@ function runJsonImportCore_(isOfflineDocMode) {
     approachType = docResolution.resolvedApproachType || approachType;
     dept = docResolution.resolvedDept || dept;
     const effectiveFromClinic = docResolution.fromClinic || item.from_clinic || resolvedClinic.inferredFromClinic || "";
-    const finalDocName = docResolution.doctorName || rawDocName;
+    const finalDocName = docResolution.isUnresolvedBackup ? "" : (docResolution.doctorName || rawDocName);
 
     const mergeKey = finalDocName ? [dateStr, d6ClinicKey, finalDocName].join("|") : "";
     let existingRowIdx = (mergeKey && doctorClinicRowMap.has(mergeKey)) ? doctorClinicRowMap.get(mergeKey) : -1;
@@ -329,7 +351,9 @@ function runJsonImportCore_(isOfflineDocMode) {
       isSpecialFromD6: isSpecialFromD6,
       isFullTime: docResolution.isFullTime,
       alreadyHasAllowance: docResolution.alreadyHasAllowance,
-      holidaySet: holidaySet
+      holidaySet: holidaySet,
+      specialWageHintText: String(item.special_wage_addon || item.memo || ""),
+      evidenceText: combinedEvidence
     });
 
     const reasons = [];
@@ -354,7 +378,7 @@ function runJsonImportCore_(isOfflineDocMode) {
         nowStr, dateStr, item.raw_clinic_name,
         resolvedClinic.candidatesText || clinicName,
         dept, effectiveAbsenceTime || item.time_category, approachType,
-        docResolution.doctorName || rawDocName,
+        finalDocName,
         d6Row ? "D6一致(" + d6Row.rowNumsText + "行目)" : "D6不一致",
         reasons.join(" / "), combinedEvidence
       ]);
@@ -373,13 +397,14 @@ function runJsonImportCore_(isOfflineDocMode) {
 
     let draftParams = null;
     let draftMessage = "";
-    if (finalDocName || approachType === "個別アプローチ") {
+    if (finalDocName || approachType === "個別アプローチ" || docResolution.isUnresolvedBackup) {
       const absParts = (effectiveAbsenceTime || "-").split("-");
       const absStart = absParts[0];
       const absEnd = absParts[1];
       draftParams = {
         rowIndex: targetRowIdx,
         rowState: rowState,
+        isDocResolved: (docResolution.status === "OK"),
         dateStr: dateStr,
         isFullTime: docResolution.isFullTime,
         doctorName: finalDocName || "{医師名}",

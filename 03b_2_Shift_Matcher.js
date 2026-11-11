@@ -5,6 +5,77 @@
  * ============================================================================
  */
 
+var BACKUP_SHIFT_NEW_MEM_CACHE_ = null;
+
+/**
+ * D3（貼付用）にバックアップ行が含まれていない場合のフォールバックとして、
+ * KINMU_SHIFT_NEW（確定シフト）から「バックアップ」枠のみを軽量取得・メモリキャッシュする
+ */
+function getBackupShiftsFromShiftNewCached_() {
+  if (BACKUP_SHIFT_NEW_MEM_CACHE_) return BACKUP_SHIFT_NEW_MEM_CACHE_;
+  BACKUP_SHIFT_NEW_MEM_CACHE_ = [];
+
+  try {
+    if (typeof EXTERNAL_IDS === "undefined" || !EXTERNAL_IDS.KINMU_SHIFT_NEW) {
+      return BACKUP_SHIFT_NEW_MEM_CACHE_;
+    }
+    const ss = SpreadsheetApp.openById(EXTERNAL_IDS.KINMU_SHIFT_NEW);
+    const sh = ss.getSheetByName("確定シフト");
+    if (!sh || sh.getLastRow() < 2) return BACKUP_SHIFT_NEW_MEM_CACHE_;
+
+    const vals = sh.getDataRange().getValues();
+    const h = vals[0];
+    const iId = h.indexOf("医籍番号");
+    const iName = h.indexOf("名前");
+    const iClinic = h.indexOf("クリニック名");
+    const iDate = h.indexOf("勤務日");
+    const iStart = h.indexOf("勤務開始時間");
+    const iEnd = h.indexOf("勤務終了時間");
+    const iWage = h.indexOf("時給合計");
+    if (iName === -1 || iClinic === -1 || iDate === -1) return BACKUP_SHIFT_NEW_MEM_CACHE_;
+
+    for (let r = 1; r < vals.length; r++) {
+      const row = vals[r];
+      const clinicName = String(row[iClinic] || "").trim();
+      if (!clinicName.includes("バックアップ")) continue;
+
+      const docName = String(row[iName] || "").replace(/\s+/g, "").trim();
+      if (!docName || docName.includes("休館")) continue;
+
+      const dateStr = normalizeDateStr_(row[iDate]);
+      if (!dateStr) continue;
+
+      const stStr = iStart !== -1 && typeof formatCellTimeHHMM_ === "function"
+        ? formatCellTimeHHMM_(row[iStart])
+        : padTime_(row[iStart]);
+      const enStr = iEnd !== -1 && typeof formatCellTimeHHMM_ === "function"
+        ? formatCellTimeHHMM_(row[iEnd])
+        : padTime_(row[iEnd]);
+      const wageVal = iWage !== -1 && row[iWage] !== "" ? Number(String(row[iWage]).replace(/,/g, "")) : -1;
+
+      BACKUP_SHIFT_NEW_MEM_CACHE_.push({
+        docId: iId !== -1 ? String(row[iId] || "").trim() : "",
+        docName,
+        normName: toStandardKanji_(docName),
+        clinicName,
+        dateStr,
+        startTime: stStr,
+        endTime: enStr,
+        isFullTime: wageVal === 0
+      });
+    }
+  } catch (e) {
+    console.log("確定シフトからのバックアップ枠取得スキップ: " + e.message);
+  }
+
+  return BACKUP_SHIFT_NEW_MEM_CACHE_;
+}
+
+function isBackupPlaceholderName_(name) {
+  const s = String(name || "").replace(/先生$/g, "").replace(/[\s\u3000]+/g, "").trim();
+  return !s || /^(?:バックアップ医師|関東バックアップ|関西バックアップ|バックアップ)$/.test(s);
+}
+
 function hasTimeExpansionIntentForMover_(evidenceText, fromClinicName) {
   const ev = String(evidenceText || "");
   if (!ev) return false;
@@ -31,10 +102,16 @@ function hasTimeExpansionIntentForMover_(evidenceText, fromClinicName) {
 }
 
 function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, dept, fromClinic, d6Row, d3Data, effectiveAbsenceTime, evidenceText, licenseNo) {
-  const cleanTarget = String(rawDocName || "").replace(/先生$/g, "").replace(/[\s ]+/g, "").trim();
+  const rawTrimmed = String(rawDocName || "").replace(/先生$/g, "").replace(/[\s ]+/g, "").trim();
+  const isBkPlaceholder = isBackupPlaceholderName_(rawTrimmed);
+  const cleanTarget = isBkPlaceholder ? "" : rawTrimmed;
   const cleanLic = String(licenseNo || "").trim();
   const [absStart, absEnd] = (effectiveAbsenceTime || "-").split("-");
   let resolvedApproachType = approachType;
+
+  if (!resolvedApproachType && rawTrimmed && isBkPlaceholder) {
+    resolvedApproachType = "バックアップ勤務依頼";
+  }
 
   let targetDept = dept;
   if (targetDept === "ワクチン専任") {
@@ -50,35 +127,127 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     }
   }
 
-  // ★0. 「バックアップ勤務依頼」の場合：関東バックアップ待機医師への出動依頼として正常通過させる
-  if (resolvedApproachType === "バックアップ勤務依頼") {
+  // ★0. 「バックアップ勤務依頼」（または移動元がバックアップで医師未特定）の場合
+  if (resolvedApproachType === "バックアップ勤務依頼" || (isBkPlaceholder && String(fromClinic || "").includes("バックアップ"))) {
     const targetClinicDisp = d6Row ? d6Row.clinicRaw : clinicName;
-    const bkShift = d3Data.find(s =>
-      s.dateStr === dateStr &&
-      ((cleanLic && s.docId === cleanLic) || (cleanTarget && toStandardKanji_(s.docName) === toStandardKanji_(cleanTarget)))
-    );
-    const docDisp = bkShift ? bkShift.docName : (cleanTarget || "バックアップ医師");
+    const clinicMeta = (typeof CLINIC_META_MAP !== "undefined" && CLINIC_META_MAP.get(clinicName)) || { area: "" };
+    const defaultBkLabel = clinicMeta.area === "関西" ? "関西バックアップ" : "関東バックアップ";
+
+    // ① 医籍番号または実名指定がある場合はその医師のシフトを検索
+    let bkShift = null;
+    if (cleanLic || cleanTarget) {
+      bkShift = d3Data.find(s =>
+        s.dateStr === dateStr &&
+        ((cleanLic && s.docId === cleanLic) || (cleanTarget && toStandardKanji_(s.docName) === toStandardKanji_(cleanTarget)))
+      );
+      if (!bkShift) {
+        const shiftNewBk = getBackupShiftsFromShiftNewCached_();
+        bkShift = shiftNewBk.find(s =>
+          s.dateStr === dateStr &&
+          ((cleanLic && s.docId === cleanLic) || (cleanTarget && s.normName === toStandardKanji_(cleanTarget)))
+        ) || null;
+      }
+    }
+
+    // ② 医師未指定（「バックアップ医師」等）の場合は、当日該当時間帯の「バックアップ」待機シフトから実在医師を検索
+    if (!bkShift && !cleanTarget) {
+      const filterBkPool = pool => pool.filter(s => {
+        if (s.dateStr !== dateStr) return false;
+        if (!String(s.clinicName || "").includes("バックアップ")) return false;
+        if (defaultBkLabel === "関西バックアップ" && s.clinicName.includes("関東")) return false;
+        if (defaultBkLabel === "関東バックアップ" && s.clinicName.includes("関西")) return false;
+        if (!effectiveAbsenceTime || !s.startTime || !s.endTime) return true;
+        return isTimeOverlapping_(`${s.startTime}-${s.endTime}`, effectiveAbsenceTime);
+      });
+
+      let bkCandidates = filterBkPool(d3Data);
+      if (bkCandidates.length === 0) {
+        bkCandidates = filterBkPool(getBackupShiftsFromShiftNewCached_());
+      }
+
+      const uniqueBkDocs = Array.from(new Set(bkCandidates.map(s => s.docName)));
+      if (uniqueBkDocs.length === 1) {
+        bkShift = bkCandidates[0];
+      } else if (uniqueBkDocs.length > 1) {
+        const curStart = absStart || "09:00";
+        const curEnd = absEnd || "13:00";
+        return {
+          status: "要確認",
+          isUnresolvedBackup: true,
+          resolvedApproachType: "勤務地変更相談",
+          resolvedDept: targetDept,
+          reason: `当日バックアップ待機医師が複数名います（${uniqueBkDocs.join(" / ")}）`,
+          doctorName: "",
+          fromClinic: defaultBkLabel,
+          isCurrentVaccine: false,
+          currentClinicLabel: defaultBkLabel,
+          currentStart: curStart,
+          currentEnd: curEnd,
+          consultStart: absStart || curStart,
+          consultEnd: absEnd || curEnd,
+          hasTimeExpansion: false,
+          consultNoteSuffix: "",
+          currentShiftLabel: `${defaultBkLabel}(候補:${uniqueBkDocs.join("・")})`,
+          consultShiftLabel: `${targetClinicDisp} ${absStart || curStart}-${absEnd || curEnd}`,
+          isFullTime: false,
+          alreadyHasAllowance: true
+        };
+      }
+    }
+
+    // ③ シフト上にも待機医師が見つからず実名もない場合は「バックアップ医師先生」にせず要確認として返す
+    const resolvedDocName = bkShift ? bkShift.docName : cleanTarget;
+    if (!resolvedDocName) {
+      const curStart = absStart || "09:00";
+      const curEnd = absEnd || "13:00";
+      return {
+        status: "要確認",
+        isUnresolvedBackup: true,
+        resolvedApproachType: "勤務地変更相談",
+        resolvedDept: targetDept,
+        reason: "当日シフトに該当時間帯のバックアップ待機医師が見つかりません（バックアップ募集施策の場合は文案送信不要）",
+        doctorName: "",
+        fromClinic: defaultBkLabel,
+        isCurrentVaccine: false,
+        currentClinicLabel: defaultBkLabel,
+        currentStart: curStart,
+        currentEnd: curEnd,
+        consultStart: absStart || curStart,
+        consultEnd: absEnd || curEnd,
+        hasTimeExpansion: false,
+        consultNoteSuffix: "",
+        currentShiftLabel: `${defaultBkLabel} ${curStart}-${curEnd}(待機医未定)`,
+        consultShiftLabel: `${targetClinicDisp} ${absStart || curStart}-${absEnd || curEnd}`,
+        isFullTime: false,
+        alreadyHasAllowance: true
+      };
+    }
+
+    const bkOriginLabel = (bkShift && bkShift.clinicName && bkShift.clinicName.includes("バックアップ"))
+      ? bkShift.clinicName
+      : defaultBkLabel;
     const curStart = bkShift ? bkShift.startTime : (absStart || "09:00");
     const curEnd = bkShift ? bkShift.endTime : (absEnd || "13:00");
+
     return {
       status: "OK",
       resolvedApproachType: "勤務地変更相談",
       resolvedDept: targetDept,
-      doctorName: docDisp,
-      fromClinic: "関東バックアップ",
+      doctorName: resolvedDocName,
+      fromClinic: bkOriginLabel,
       isCurrentVaccine: false,
-      currentClinicLabel: "関東バックアップ",
+      currentClinicLabel: bkOriginLabel,
       currentStart: curStart,
       currentEnd: curEnd,
       consultStart: absStart || curStart,
       consultEnd: absEnd || curEnd,
       hasTimeExpansion: false,
       consultNoteSuffix: "",
-      currentShiftLabel: `関東バックアップ ${curStart}-${curEnd}`,
+      currentShiftLabel: `${bkOriginLabel} ${curStart}-${curEnd}`,
       consultShiftLabel: `${targetClinicDisp} ${absStart || curStart}-${absEnd || curEnd}`,
       isFullTime: bkShift ? bkShift.isFullTime : false,
       alreadyHasAllowance: true, // バックアップ医師は移動依頼手当(10,000円)対象外
-      evidenceNote: `バックアップ医師に勤務依頼(${docDisp})`
+      evidenceNote: `バックアップ医師に勤務依頼(${resolvedDocName})`
     };
   }
 
@@ -246,10 +415,10 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     }
   }
 
-  if (resolvedApproachType === "募集継続・ステイ") {
+  if (resolvedApproachType === "募集継続・ステイ" || resolvedApproachType === "ステイ") {
     return {
       status: "OK",
-      resolvedApproachType,
+      resolvedApproachType: "募集継続・ステイ",
       resolvedDept: targetDept,
       doctorName: "",
       currentShiftLabel: "-",
@@ -261,8 +430,8 @@ function resolveDoctorAndShift_(rawDocName, approachType, dateStr, clinicName, d
     status: "要確認",
     resolvedApproachType,
     resolvedDept: targetDept,
-    reason: rawDocName ? `当日シフトに「${rawDocName}」先生が見つかりません` : "対象医師が未指定",
-    doctorName: rawDocName,
+    reason: cleanTarget ? `当日シフトに「${cleanTarget}」先生が見つかりません` : "対象医師が未指定",
+    doctorName: cleanTarget,
     fromClinic: fromClinic || "",
     currentShiftLabel: "要確認",
     consultShiftLabel: effectiveAbsenceTime ? `${clinicName}${effectiveAbsenceTime}` : "要確認"

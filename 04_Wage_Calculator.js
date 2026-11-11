@@ -189,8 +189,8 @@ function resolveSpecialHourlyBonusAmount_(isSpecial, isSpecialFromD6, specialWag
     return baseSp + extraAmt;
   }
 
-  // 「特別時給+3,000円交渉」のように加算額が明示されている場合
-  const amtMatch = hint.match(/特別時給[^\d+＋]*[\+＋]\s*([0-9,]+)\s*円/);
+  // 「特別時給+3,000円交渉」「午後バックアップ3000円」「+3,000円」のように加算額（2,000〜5,000円）が明示されている場合
+  const amtMatch = hint.match(/(?:特別時給[^\d+＋]*[\+＋]|バックアップ[^\d]*[\+＋]?|[\+＋])\s*([2-5],?000)\s*円/);
   if (amtMatch) {
     const amt = Number(amtMatch[1].replace(/,/g, "")) || 2000;
     return amt;
