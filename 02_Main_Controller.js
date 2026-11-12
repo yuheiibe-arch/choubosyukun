@@ -1,33 +1,25 @@
 /**
  * ============================================================================
  * 02_Main_Controller.gs
- * メイン実行エントリーポイント（シンプル3行メニュー・自動振り分け・医籍番号直結照合対応版）
+ * メイン実行エントリーポイント（スマートマージ取込・確認済保護・充足自動削除・おまとめ再構成対応版）
  * ============================================================================
  */
 
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("🤖 超募集くんAgent")
-    .addItem("📥 ① 最新データを取り込む", "importLatestJsonSmart")
-    .addItem("🚀 ② 確認済の行をSlackへ投稿", "executeApprovedRows")
+    .addItem("📥 ① 最新データを取り込む（差分マージ・充足整理）", "importLatestJsonSmart")
+    .addItem("🚀 ② 確認済の行をSlackへ投稿（同日1枠まとめ更新）", "executeApprovedRows")
     .addItem("🕹️ ③ 修正くんを開く", "openShuseikunModal")
+    .addSeparator()
+    .addItem("🧹 充足枠のみ最新D6で自動整理", "refreshActiveSheetAgainstD6Only")
     .addToUi();
 }
 
 function importLatestJsonSmart() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const logSheet = ss.getSheetByName(SHEET_NAMES.D7_LOG);
-  const loggedIds = new Set();
-
-  if (logSheet && logSheet.getLastRow() >= 2) {
-    logSheet
-      .getRange(2, 3, logSheet.getLastRow() - 1, 1)
-      .getDisplayValues()
-      .forEach(function(r) {
-        const id = String(r[0] || "").trim();
-        if (id) loggedIds.add(id);
-      });
-  }
+  const loggedIds = getLoggedEmailIdsFromD7Log_(logSheet);
 
   const offlineBatch = collectLatestJsonBatchFromGmail_(true);
   const voiceBatch = collectLatestJsonBatchFromGmail_(false);
@@ -36,17 +28,37 @@ function importLatestJsonSmart() {
   const hasNewVoice = Boolean(voiceBatch && voiceBatch.latestMsgId && !loggedIds.has(voiceBatch.latestMsgId));
 
   if (hasNewOffline || hasNewVoice) {
-    if (hasNewOffline) runJsonImportCore_(true);
-    if (hasNewVoice) runJsonImportCore_(false);
+    if (hasNewOffline) runJsonImportCore_(true, { skipIfLogged: true });
+    if (hasNewVoice) runJsonImportCore_(false, { skipIfLogged: true });
     return;
   }
 
+  // 新着の未取込JSONメールがない場合は、既存行の「D6充足削除＆片方充足おまとめ再構成」のみ安全に実行する
   const activeName = ss.getActiveSheet() ? ss.getActiveSheet().getName() : "";
   const offlineSheetName = SHEET_NAMES.D7_OFFLINE_REVIEW || "オフライン修正シート";
-  if (activeName === offlineSheetName) {
-    runJsonImportCore_(true);
-  } else {
-    runJsonImportCore_(false);
+  const isOffline = (activeName === offlineSheetName);
+  const stats = runJsonImportCore_(isOffline, { pruneOnly: true });
+  if (stats) {
+    ss.toast(
+      `新着JSONメールはありません。最新D6と照合し、充足削除:${stats.removedFilledOrReplacedCount}件 / 単枠再構成:${stats.rebuiltBundleCount}件 / 残存保護:${stats.keptCheckedCount + stats.keptUncheckedCount}件を整理しました。`,
+      "🧹 充足整理完了",
+      6
+    );
+  }
+}
+
+function refreshActiveSheetAgainstD6Only() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const activeName = ss.getActiveSheet() ? ss.getActiveSheet().getName() : "";
+  const offlineSheetName = SHEET_NAMES.D7_OFFLINE_REVIEW || "オフライン修正シート";
+  const isOffline = (activeName === offlineSheetName);
+  const stats = runJsonImportCore_(isOffline, { pruneOnly: true });
+  if (stats) {
+    ss.toast(
+      `充足削除:${stats.removedFilledOrReplacedCount}件 / おまとめ再構成:${stats.rebuiltBundleCount}件 / 確認済保護:${stats.keptCheckedCount}件 / 未送信維持:${stats.keptUncheckedCount}件`,
+      "✅ D6充足整理完了",
+      6
+    );
   }
 }
 
@@ -82,11 +94,11 @@ function sortReviewRowsAndParamsByDate_(reviewRows, draftParamsByRowIdx) {
 }
 
 function importLatestJsonAndBuildReview() {
-  return runJsonImportCore_(false);
+  return runJsonImportCore_(false, { skipIfLogged: false });
 }
 
 function importOfflineDocJsonAndBuildSheet() {
-  return runJsonImportCore_(true);
+  return runJsonImportCore_(true, { skipIfLogged: false });
 }
 
 function resolveExactDocNameByLicenseNo_(licenseNo, fallbackName, dateStr, d3Data) {
@@ -118,7 +130,8 @@ function resolveExactDocNameByLicenseNo_(licenseNo, fallbackName, dateStr, d3Dat
   return fallbackName;
 }
 
-function runJsonImportCore_(isOfflineDocMode) {
+function runJsonImportCore_(isOfflineDocMode, optionsOpt) {
+  const opts = optionsOpt || {};
   const d7Ss = SpreadsheetApp.getActiveSpreadsheet();
   const offlineSheetName = SHEET_NAMES.D7_OFFLINE_REVIEW || "オフライン修正シート";
   const targetReviewSheetName = isOfflineDocMode ? offlineSheetName : SHEET_NAMES.D7_REVIEW;
@@ -147,15 +160,6 @@ function runJsonImportCore_(isOfflineDocMode) {
 
   revSheet.getRange(1, 1).setValue("確認済");
 
-  const batchResult = collectLatestJsonBatchFromGmail_(isOfflineDocMode);
-  if (!batchResult || batchResult.items.length === 0) {
-    console.log("対象メールが見つかりませんでした。");
-    return;
-  }
-
-  const items = batchResult.items;
-  console.log(batchResult.msgCount + " 通のJSONメールから合計 " + items.length + " 件を読み込み、『" + targetReviewSheetName + "』へ展開します...");
-
   const unfilledSs = SpreadsheetApp.openById(EXTERNAL_IDS.D6_D3_UNFILLED_SS);
   const wageSs = SpreadsheetApp.openById(EXTERNAL_IDS.D4_D5_WAGE_SS);
   const d5ClinicSheet = wageSs.getSheetByName(SHEET_NAMES.D5_CLINICS);
@@ -166,6 +170,33 @@ function runJsonImportCore_(isOfflineDocMode) {
   const d3Data = loadD3PastedShifts_(unfilledSs.getSheetByName(SHEET_NAMES.D3_PASTED));
   const holidaySet = loadHolidaySet_(d7Ss.getSheetByName(SHEET_NAMES.D7_HOLIDAY));
   const staffList = loadStaffMasterFromD7_(d7Ss);
+
+  // 整理のみモード、または既取込メールスキップ判定
+  let batchResult = null;
+  if (!opts.pruneOnly) {
+    batchResult = collectLatestJsonBatchFromGmail_(isOfflineDocMode);
+    if (batchResult && opts.skipIfLogged) {
+      const loggedIds = getLoggedEmailIdsFromD7Log_(logSheet);
+      if (batchResult.latestMsgId && loggedIds.has(batchResult.latestMsgId)) {
+        batchResult = null;
+      }
+    }
+  }
+
+  if (!batchResult || !batchResult.items || batchResult.items.length === 0) {
+    return mergeAndWriteReviewSheetSmart_({
+      revSheet: revSheet,
+      incomingRows: [],
+      d6Data: d6Data,
+      d3Data: d3Data,
+      wageSs: wageSs,
+      holidaySet: holidaySet,
+      staffList: staffList
+    });
+  }
+
+  const items = batchResult.items;
+  console.log(batchResult.msgCount + " 通のJSONメールから合計 " + items.length + " 件を読み込み、『" + targetReviewSheetName + "』へスマートマージします...");
 
   const nowStr = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd HH:mm");
   const baseDateYmd = batchResult.latestMsgDateYmd || Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd");
@@ -195,7 +226,6 @@ function runJsonImportCore_(isOfflineDocMode) {
     const itemLicenseNo = String(item.license_no || "").trim();
     let rawAssignee = (item.assignee || "").trim();
 
-    // ★「バックアップ医師」等の汎用プレースホルダーは個人名として扱わない（後続のD3/確定シフトのバックアップ待機医師検索へ委ねる）
     if (/^(?:バックアップ医師|関東バックアップ|関西バックアップ|バックアップ)$/.test(rawDocName)) {
       if (!approachType) approachType = "バックアップ勤務依頼";
       rawDocName = "";
@@ -225,7 +255,6 @@ function runJsonImportCore_(isOfflineDocMode) {
       approachType = "個別アプローチ";
     }
 
-    // ★ステイ・充足・破損断片は文案不要のためスキップ
     if (
       approachType === "募集継続・ステイ" ||
       approachType === "ステイ" ||
@@ -252,6 +281,11 @@ function runJsonImportCore_(isOfflineDocMode) {
 
     if (isKitaOrKame && dept === "要確認" && d6Row && d6Row.dept) {
       dept = d6Row.dept;
+    }
+
+    // 提出後にすでにD6から消えて充足していた枠は新規追加しない
+    if (!d6Row && dept !== "ワクチン専任" && d6Data.length > 0 && isOfflineDocMode) {
+      continue;
     }
 
     let d6ClinicKey = d6Row
@@ -495,7 +529,7 @@ function runJsonImportCore_(isOfflineDocMode) {
 
   sortReviewRowsAndParamsByDate_(reviewRows, draftParamsByRowIdx);
 
-  consolidateMultiDateDoctorDrafts_(reviewRows, draftParamsByRowIdx);
+  consolidateMultiDateDoctorDraftsV2_(reviewRows, draftParamsByRowIdx);
 
   for (let r = 0; r < reviewRows.length; r++) {
     const cleanStaff = extractCleanStaffName_(reviewRows[r][15]);
@@ -505,32 +539,16 @@ function runJsonImportCore_(isOfflineDocMode) {
     }
   }
 
-  writeDataExactRows_(revSheet, reviewRows, 24);
-  if (reviewRows.length > 0) {
-    revSheet.getRange(2, 1, reviewRows.length, 24).setBackground("#ffffff").setFontColor("#000000");
-    revSheet.getRange(2, 1, reviewRows.length, 1).insertCheckboxes();
-
-    const specialRule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(["特別時給", "通常時給"], true)
-      .setAllowInvalid(false)
-      .build();
-    revSheet.getRange(2, 12, reviewRows.length, 1).setDataValidation(specialRule);
-
-    if (staffList.length > 0) {
-      const staffRule = SpreadsheetApp.newDataValidation()
-        .requireValueInList(staffList, true)
-        .setAllowInvalid(true)
-        .build();
-      revSheet.getRange(2, 16, reviewRows.length, 1).setDataValidation(staffRule);
-    }
-
-    const postTypeRule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(["通常", "引用して更新"], true)
-      .setAllowInvalid(false)
-      .build();
-    revSheet.getRange(2, 20, reviewRows.length, 1).setDataValidation(postTypeRule);
-  }
-  applyLeftMiddleToSheet_(revSheet);
+  // ★既存行（確認済保護＋未送信維持＋充足削除＋おまとめ再構成）と新規行をマージ出力
+  const mergeStats = mergeAndWriteReviewSheetSmart_({
+    revSheet: revSheet,
+    incomingRows: reviewRows,
+    d6Data: d6Data,
+    d3Data: d3Data,
+    wageSs: wageSs,
+    holidaySet: holidaySet,
+    staffList: staffList
+  });
 
   if (!isOfflineDocMode) {
     if (confirmRows.length > 1) {
@@ -542,36 +560,28 @@ function runJsonImportCore_(isOfflineDocMode) {
     applyLeftMiddleToSheet_(confSheet);
   }
 
-  const logTypeLabel = isOfflineDocMode ? "JSON取込(オフライン修正)" : "JSON取込(口頭MTG)";
-  appendRowAndTrimBlank_(logSheet, [nowStr, logTypeLabel, batchResult.latestMsgId, batchResult.latestSubject, reviewRows.length, "出力先:" + targetReviewSheetName], 6);
+  const logTypeLabel = isOfflineDocMode ? "JSONマージ取込(オフライン修正)" : "JSONマージ取込(口頭MTG)";
+  const summaryMemo = `出力先:${targetReviewSheetName} (新規:${mergeStats.addedNewCount} / 確認済保護:${mergeStats.keptCheckedCount} / 未送信維持:${mergeStats.keptUncheckedCount} / 再構成:${mergeStats.rebuiltBundleCount} / 充足削除:${mergeStats.removedFilledOrReplacedCount})`;
+  appendRowAndTrimBlank_(logSheet, [nowStr, logTypeLabel, batchResult.latestMsgId, batchResult.latestSubject, mergeStats.totalCount, summaryMemo], 6);
   applyLeftMiddleToSheet_(logSheet);
 
   sendImportCompletionNotifications_(targetReviewSheetName);
+  return mergeStats;
 }
 
 function autoImportTriggerHandler() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const logSheet = ss.getSheetByName(SHEET_NAMES.D7_LOG);
-  const loggedIds = new Set();
-
-  if (logSheet && logSheet.getLastRow() >= 2) {
-    logSheet
-      .getRange(2, 3, logSheet.getLastRow() - 1, 1)
-      .getDisplayValues()
-      .forEach(function(r) {
-        const id = String(r[0] || "").trim();
-        if (id) loggedIds.add(id);
-      });
-  }
+  const loggedIds = getLoggedEmailIdsFromD7Log_(logSheet);
 
   const offlineBatch = collectLatestJsonBatchFromGmail_(true);
   if (offlineBatch && offlineBatch.latestMsgId && offlineBatch.items.length > 0 && !loggedIds.has(offlineBatch.latestMsgId)) {
-    importOfflineDocJsonAndBuildSheet();
+    runJsonImportCore_(true, { skipIfLogged: true });
     loggedIds.add(offlineBatch.latestMsgId);
   }
 
   const voiceBatch = collectLatestJsonBatchFromGmail_(false);
   if (voiceBatch && voiceBatch.latestMsgId && voiceBatch.items.length > 0 && !loggedIds.has(voiceBatch.latestMsgId)) {
-    importLatestJsonAndBuildReview();
+    runJsonImportCore_(false, { skipIfLogged: true });
   }
 }
