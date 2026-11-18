@@ -1,8 +1,8 @@
 /**
  * ============================================================================
  * 02b_2_Merge_Consolidator.gs（マージ管理 3分割の2）
- * ・おまとめ行のうち一部枠のみ充足した際の「単枠／残存枠文案への自動再構成」
- * ・新規到着バッチ内の複数日程おまとめ集約（未特定医師の誤結合防止ガード付）
+ * おまとめ行のうち一部枠のみ充足した際の「単枠／残存枠文案への自動再構成（既存担当者維持）」専用
+ * （※新規おまとめ集約本体は 02a_2_Consolidate_Rows.gs に一本化済）
  * ============================================================================
  */
 
@@ -116,7 +116,7 @@ function rebuildSurvivingSubsetRow_(origRow, survivingSlots, ctx) {
     });
   }
 
-  // 1枠だけ残った場合 ➔ 単枠用の文案・表示に完全再構成
+  // 1枠だけ残った場合 ➔ 単枠用の文案・表示に完全再構成（既存の担当者 staffName も完全維持）
   if (entries.length === 1) {
     const e0 = entries[0];
     const s0 = slotRowDatas[0];
@@ -155,7 +155,7 @@ function rebuildSurvivingSubsetRow_(origRow, survivingSlots, ctx) {
     ];
   }
 
-  // 2枠以上残った場合 ➔ 残存枠のみでのおまとめ文案に再構成
+  // 2枠以上残った場合 ➔ 残存枠のみでのおまとめ文案に再構成（既存の担当者 staffName も完全維持）
   const uniqueDates = Array.from(new Set(entries.map(function(e) { return e.dateStr; })));
   const allMovers = entries.every(function(e) { return e.approachType === "勤務地変更相談"; });
   const allIndividuals = entries.every(function(e) { return e.approachType === "個別アプローチ"; });
@@ -210,109 +210,4 @@ function rebuildSurvivingSubsetRow_(origRow, survivingSlots, ctx) {
     "",
     ""
   ];
-}
-
-function consolidateMultiDateDoctorDraftsV2_(reviewRows, draftParamsByRowIdx) {
-  for (let i = 0; i < reviewRows.length; i++) {
-    if (typeof cleanVerboseEvidenceCell_ === "function") {
-      reviewRows[i][21] = cleanVerboseEvidenceCell_(reviewRows[i][21]);
-    }
-  }
-
-  const byDoctor = new Map();
-  for (let i = 0; i < draftParamsByRowIdx.length; i++) {
-    const p = draftParamsByRowIdx[i];
-    if (!p || !p.doctorName || p.doctorName === "{医師名}" || p.doctorName.includes("\n")) continue;
-    if (p.isDocResolved === false) continue;
-    if (p.rowState !== "未レビュー") continue;
-    if (p.approachType === "募集継続・ステイ" || p.approachType === "ステイ") continue;
-
-    const cleanDocKey = String(p.doctorName).replace(/先生$/g, "").trim();
-    if (!cleanDocKey) continue;
-    if (!byDoctor.has(cleanDocKey)) byDoctor.set(cleanDocKey, []);
-    byDoctor.get(cleanDocKey).push(p);
-  }
-
-  const rowIndicesToDelete = new Set();
-
-  for (const [docName, rawEntries] of byDoctor.entries()) {
-    if (rawEntries.length < 2) continue;
-
-    const entries = [];
-    rawEntries.forEach(function(p) {
-      const isDup = entries.some(function(ex) {
-        return ex.dateStr === p.dateStr &&
-          ex.clinicName === p.clinicName &&
-          ex.absenceStart === p.absenceStart &&
-          ex.approachType === p.approachType;
-      });
-      if (!isDup) entries.push(p);
-      else rowIndicesToDelete.add(p.rowIndex);
-    });
-
-    if (entries.length < 2) continue;
-
-    entries.sort(function(a, b) {
-      return a.dateStr.localeCompare(b.dateStr) ||
-        String(a.consultStart || a.absenceStart || "").localeCompare(String(b.consultStart || b.absenceStart || ""));
-    });
-
-    const uniqueDates = Array.from(new Set(entries.map(function(e) { return e.dateStr; })));
-    const allMovers = entries.every(function(e) { return e.approachType === "勤務地変更相談"; });
-    const allIndividuals = entries.every(function(e) { return e.approachType === "個別アプローチ"; });
-
-    let combinedDraft = "";
-    if (uniqueDates.length === 1 && allMovers) {
-      combinedDraft = buildSameDateMultiClinicMoverTemplate_(entries);
-    } else if (allIndividuals) {
-      combinedDraft = buildMultiDateIndividualTemplate_(entries);
-    } else {
-      combinedDraft = buildUnifiedMultiSlotDraftTemplate_(entries);
-    }
-
-    const primaryIdx = entries[0].rowIndex;
-    const primaryRow = reviewRows[primaryIdx];
-
-    primaryRow[3] = entries.map(function(e) { return e.dateStr; }).join("\n");
-    primaryRow[4] = entries.map(function(e) { return reviewRows[e.rowIndex][4]; }).join("\n");
-    primaryRow[5] = entries.map(function(e) { return reviewRows[e.rowIndex][5]; }).join("\n");
-    primaryRow[6] = Array.from(new Set(entries.map(function(e) { return reviewRows[e.rowIndex][6]; }).filter(Boolean))).join("・") || "小児科";
-    primaryRow[7] = Array.from(new Set(entries.map(function(e) { return e.approachType; }).filter(Boolean))).join("・");
-
-    const curShifts = Array.from(new Set(entries.map(function(e) { return reviewRows[e.rowIndex][9]; }).filter(function(v) { return v && v !== "-"; })));
-    primaryRow[9] = curShifts.length > 0 ? curShifts.join("\n") : "-";
-    primaryRow[10] = entries.map(function(e) { return e.dateStr.slice(5) + " " + reviewRows[e.rowIndex][10]; }).join("\n");
-    primaryRow[11] = entries.some(function(e) { return String(reviewRows[e.rowIndex][11] || "").includes("特別時給"); }) ? "特別時給" : "通常時給";
-
-    const wageLabels = entries.map(function(e) {
-      const w = Number(String(reviewRows[e.rowIndex][13] || "0").replace(/,/g, ""));
-      return w > 0 ? (formatComma_(w) + "円") : "-";
-    });
-    primaryRow[13] = wageLabels.every(function(w) { return w === "-"; }) ? "" : wageLabels.join("\n");
-    primaryRow[16] = combinedDraft;
-
-    if (uniqueDates.length === 1 && allMovers) {
-      const allClinicsLabel = entries.map(function(e) { return e.clinicName; }).join("・");
-      if (primaryRow[17] && !String(primaryRow[17]).includes("候補：")) {
-        primaryRow[17] += "（候補：" + allClinicsLabel + "）";
-      }
-    }
-
-    primaryRow[20] = entries.map(function(e) { return reviewRows[e.rowIndex][20]; }).filter(Boolean).join("\n\n");
-    const slotSummary = entries.map(function(e) { return e.dateStr.slice(5) + " " + e.clinicName; }).join("・");
-    primaryRow[21] = "おまとめ全" + entries.length + "枠（" + slotSummary + "）";
-
-    for (let k = 1; k < entries.length; k++) {
-      rowIndicesToDelete.add(entries[k].rowIndex);
-    }
-  }
-
-  const sortedDel = Array.from(rowIndicesToDelete).sort(function(a, b) { return b - a; });
-  for (let dIdx = 0; dIdx < sortedDel.length; dIdx++) {
-    const delIdx = sortedDel[dIdx];
-    reviewRows.splice(delIdx, 1);
-    if (draftParamsByRowIdx && delIdx < draftParamsByRowIdx.length) {
-      draftParamsByRowIdx.splice(delIdx, 1);
-    }
-  }
 }
