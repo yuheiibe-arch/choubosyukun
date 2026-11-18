@@ -1,273 +1,114 @@
 /**
  * ============================================================================
- * 01b_Templates_Single.gs（01系 3分割の2）
- * 単枠用の8章送信文案テンプレート（buildMessageTemplate_：常勤・非常勤／早出・延長・移動・個別）
+ * 02a_1_Workspace_Setup.gs（旧02b_Setup 4分割の1）
+ * ・レビュー表ヘッダー定義・D7ワークスペース初期セットアップ（setupD7Workspace）
+ * ・時間帯カテゴリ推定・過去完了報告判定・根拠欄（V列）クリーンアップ
  * ============================================================================
  */
 
-function buildMessageTemplate_(params) {
-  const {
-    isFullTime, doctorName, staffName, approachType, shiftType,
-    dateObj, isTomorrow, clinicName, currentClinicLabel, fromClinicName,
-    absenceStart, absenceEnd, currentStart, currentEnd,
-    consultStart, consultEnd, consultNoteSuffix, diffHoursText,
-    isMorningToNightExt, consultPm1DailyWage,
-    currentDailyWage, consultDailyWage, hasRequestAllow, isPublicRecruit,
-    multiTargets
-  } = params;
-
-  const docHonorific = `${doctorName || "{医師名}"}先生`;
-  const staffLabel = extractCleanStaffName_(staffName) || "{担当者名}";
-  const mdDay = formatMdDay_(dateObj);
-  const ymdDay = formatYmdDay_(dateObj);
-  const tomorrowPrefix = isTomorrow ? "明日" : "";
-  const curWageStr = formatComma_(currentDailyWage);
-  const pm1WageStr = formatComma_(consultPm1DailyWage);
-  const conWageStr = formatComma_(consultDailyWage);
-  const curClinicDisp = currentClinicLabel || clinicName;
-  const noteSuffix = consultNoteSuffix ? ` ${consultNoteSuffix}` : "";
-  const pm1NoteSuffix = noteSuffix ? noteSuffix.replace(/~\d{2}:\d{2}/, "~18:00") : "";
-
-  if (isFullTime) {
-    if (approachType === "延長相談" && isMorningToNightExt) {
-      return [
-        docHonorific,
-        "お疲れ様です。",
-        `ドクターサポート部の${staffLabel}です。`,
-        "",
-        `この度は、${tomorrowPrefix}${mdDay}のご勤務につきましてご相談がありご連絡させていただきました。`,
-        `現在、【${clinicName}】${absenceStart}~${absenceEnd}の時間帯に医師不在となる可能性があるため、`,
-        `長時間のご勤務となり大変恐縮ではございますが、もし先生のご都合がよろしければ、可能な限りご勤務時間を延長していただくことは可能でしょうか。`,
-        `18:00まで、あるいは${consultEnd}までなど、可能な範囲でご検討いただけますと幸いです。`,
-        "",
-        `・${ymdDay}`,
-        `現在)【${curClinicDisp}】${currentStart}~${currentEnd}`,
-        `ご相談①) 【${clinicName}】${currentStart}~18:00${pm1NoteSuffix}`,
-        `ご相談②) 【${clinicName}】${currentStart}~${consultEnd}${noteSuffix}`,
-        "",
-        "長時間にわたり大きなご負担をおかけするお願いとなり大変心苦しい限りではございますが、ご無理のない範囲でご検討いただけますと幸いです。",
-        "お忙しいところ誠に恐縮ではございますが、何卒よろしくお願い申し上げます。",
-        "",
-        `ドクターサポート部\u3000${staffLabel}`
-      ].join("\n");
-    }
-
-    let consultPhrase = "ご勤務いただくことは可能でしょうか。";
-    let hasCurrentRow = false;
-    let curLabelForFullTime = curClinicDisp;
-    let targetStartForFullTime = consultStart || absenceStart;
-    let targetEndForFullTime = consultEnd || absenceEnd;
-
-    if (approachType === "延長相談") {
-      consultPhrase = `ご勤務時間を${diffHoursText}延長していただくことは可能でしょうか。`;
-      hasCurrentRow = true;
-    } else if (approachType === "早出相談") {
-      consultPhrase = `ご勤務時間を${diffHoursText}前倒ししていただくことは可能でしょうか。`;
-      hasCurrentRow = true;
-    } else if (approachType === "勤務地変更相談") {
-      consultPhrase = `ご勤務拠点を 【${fromClinicName}】 より 【${clinicName}】 へご変更いただくことは可能でしょうか。`;
-      hasCurrentRow = true;
-      curLabelForFullTime = fromClinicName;
-    } else {
-      targetStartForFullTime = absenceStart;
-      targetEndForFullTime = absenceEnd;
-    }
-
-    const lines = [
-      docHonorific,
-      "お疲れ様です。",
-      `ドクターサポート部の${staffLabel}です。`,
-      "",
-      `この度は、${tomorrowPrefix}${mdDay}のご勤務につきましてご相談がありご連絡させていただきました。`,
-      `現在、【${clinicName}】${absenceStart}~${absenceEnd}の時間帯に医師不在となる可能性があるため、`,
-      `大変恐縮ではございますがもし先生のご都合がよろしければ、${consultPhrase}`,
-      "",
-      `・${ymdDay}`
-    ];
-    if (hasCurrentRow) lines.push(`現在)【${curLabelForFullTime}】${currentStart}~${currentEnd}`);
-    lines.push(`ご相談) 【${clinicName}】${targetStartForFullTime}~${targetEndForFullTime}${noteSuffix}`);
-    lines.push("");
-    lines.push("急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。");
-    lines.push("お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。");
-    lines.push("");
-    lines.push(`ドクターサポート部\u3000${staffLabel}`);
-    return lines.join("\n");
-  }
-
-  if (approachType === "早出相談") {
-    return [
-      docHonorific,
-      "平素よりお世話になっております。",
-      `ドクターサポート事務局の${staffLabel}でございます。`,
-      "",
-      `この度は、${tomorrowPrefix}${mdDay}のご勤務につきましてご相談がありご連絡させていただきました。`,
-      `現在、【${clinicName}】${absenceStart}~${absenceEnd}の時間帯に医師不在となる可能性があるため、`,
-      `大変恐縮ではございますがもし先生のご都合がよろしければ、ご勤務時間を${diffHoursText}前倒ししていただくことは可能でしょうか。`,
-      "",
-      `・${ymdDay}`,
-      `現在)【${curClinicDisp}】${currentStart}~${currentEnd}`,
-      `日給:${curWageStr}円`,
-      `ご相談) 【${clinicName}】${consultStart}~${currentEnd}${noteSuffix}`,
-      `日給:${conWageStr}円`,
-      "",
-      "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
-      "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
-      "",
-      `ドクターサポート事務局\u3000${staffLabel}`
-    ].join("\n");
-  }
-
-  if (approachType === "延長相談") {
-    if (isMorningToNightExt) {
-      return [
-        docHonorific,
-        "平素よりお世話になっております。",
-        `ドクターサポート事務局の${staffLabel}でございます。`,
-        "",
-        `この度は、${tomorrowPrefix}${mdDay}のご勤務につきましてご相談がありご連絡させていただきました。`,
-        `現在、【${clinicName}】${absenceStart}~${absenceEnd}の時間帯に医師不在となる可能性があるため、`,
-        "長時間のご勤務となり大変恐縮ではございますが、もし先生のご都合がよろしければ、可能な限りご勤務時間を延長していただくことは可能でしょうか。",
-        `18:00まで、あるいは${consultEnd}までなど、可能な範囲でご検討いただけますと幸いです。`,
-        "",
-        `・${ymdDay}`,
-        `現在)【${curClinicDisp}】${currentStart}~${currentEnd}`,
-        `日給:${curWageStr}円`,
-        "",
-        `ご相談①) 【${clinicName}】${currentStart}~18:00${pm1NoteSuffix}`,
-        `日給:${pm1WageStr}円`,
-        `ご相談②) 【${clinicName}】${currentStart}~${consultEnd}${noteSuffix}`,
-        `日給:${conWageStr}円`,
-        "",
-        "長時間にわたり大きなご負担をおかけするお願いとなり大変心苦しい限りではございますが、ご無理のない範囲でご検討いただけますと幸いです。",
-        "お忙しいところ誠に恐縮ではございますが、何卒よろしくお願い申し上げます。",
-        "",
-        `ドクターサポート事務局\u3000${staffLabel}`
-      ].join("\n");
-    }
-
-    return [
-      docHonorific,
-      "平素よりお世話になっております。",
-      `ドクターサポート事務局の${staffLabel}でございます。`,
-      "",
-      `この度は、${tomorrowPrefix}${mdDay}のご勤務につきましてご相談がありご連絡させていただきました。`,
-      `現在、【${clinicName}】${absenceStart}~${absenceEnd}の時間帯に医師不在となる可能性があるため、`,
-      `大変恐縮ではございますがもし先生のご都合がよろしければ、ご勤務時間を${diffHoursText}延長していただくことは可能でしょうか。`,
-      "",
-      `・${ymdDay}`,
-      `現在)【${curClinicDisp}】${currentStart}~${currentEnd}`,
-      `日給:${curWageStr}円`,
-      `ご相談) 【${clinicName}】${currentStart}~${consultEnd}${noteSuffix}`,
-      `日給:${conWageStr}円`,
-      "",
-      "急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。",
-      "お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。",
-      "",
-      `ドクターサポート事務局\u3000${staffLabel}`
-    ].join("\n");
-  }
-
-  if (approachType === "勤務地変更相談") {
-    if (shiftType === "応募") {
-      const m = dateObj.getMonth() + 1;
-      return [
-        docHonorific,
-        "平素よりお世話になっております。",
-        `ドクターサポート事務局の${staffLabel}でございます。`,
-        "",
-        `このたびは${m}月に多くのご応募いただき、誠にありがとうございます。`,
-        `恐れ入りますが、${mdDay}のご応募につきまして、ご相談差し上げたくご連絡いたしました。`,
-        "医師不在の拠点が多く、もし先生のご都合がよろしければ、ご勤務地を変更いただくことは可能でしょうか。",
-        "その際は時給を高時給の拠点に合わせてご案内させていただきます。",
-        "",
-        `■${ymdDay}`,
-        `現在)【${fromClinicName}】${currentStart}~${currentEnd} 日給${curWageStr}円`,
-        `ご相談) 【${clinicName}】${consultStart}~${consultEnd} 日給${conWageStr}円`,
-        "",
-        "難しい場合は現在の拠点にて採用させていただきますので、お手数をおかけいたしますが、ご検討いただけましたら幸いです。",
-        "何卒よろしくお願い申し上げます。",
-        "",
-        `ドクターサポート事務局\u3000${staffLabel}`
-      ].join("\n");
-    }
-
-    const allowSuffix = hasRequestAllow ? "+依頼手当10,000円" : "";
-
-    if (Array.isArray(multiTargets) && multiTargets.length > 1) {
-      const toNames = multiTargets.map(function(t) { return `【${t.clinicName}】`; }).join(" または ");
-      const consultLines = multiTargets.map(function(t, idx) {
-        const cW = formatComma_(t.consultDailyWage);
-        const aSuf = t.hasRequestAllow ? "+依頼手当10,000円" : allowSuffix;
-        return `ご相談${getCircledNumber_(idx + 1)}) 【${t.clinicName}】${t.consultStart || consultStart}~${t.consultEnd || consultEnd}(日給:${cW}円${aSuf})`;
-      });
-      return [
-        docHonorific,
-        "平素よりお世話になっております。",
-        `ドクターサポート事務局の${staffLabel}でございます。`,
-        "",
-        `ご勤務のご相談が重なり恐縮ですが、${tomorrowPrefix}${mdDay}のご勤務につきましてご相談でございます。`,
-        `当日のご勤務拠点を 【${fromClinicName}】 より ${toNames} へご変更いただくことは可能でしょうか。`,
-        "",
-        `■${mdDay}`,
-        `現在)【${fromClinicName}】 ${currentStart}~${currentEnd} (日給:${curWageStr}円)`,
-        "↓",
-        ...consultLines,
-        "",
-        "※上記募集は公開中のため、ご応募いただいた際に充足している可能性もございます。",
-        "恐れ入りますが、充足の際はご容赦くださいませ。",
-        "",
-        "お忙しいところ、ご負担をおかけして恐縮ではございますが、ご検討いただけましたら幸いです。",
-        "何卒よろしくお願い申し上げます。",
-        "",
-        `ドクターサポート事務局\u3000${staffLabel}`
-      ].join("\n");
-    }
-
-    return [
-      docHonorific,
-      "平素よりお世話になっております。",
-      `ドクターサポート事務局の${staffLabel}でございます。`,
-      "",
-      `ご勤務のご相談が重なり恐縮ですが、${tomorrowPrefix}${mdDay}のご勤務につきましてご相談でございます。`,
-      `当日のご勤務拠点を 【${fromClinicName}】 より 【${clinicName}】 へご変更いただくことは可能でしょうか。`,
-      "",
-      `■${mdDay}`,
-      `現在)【${fromClinicName}】 ${currentStart}~${currentEnd} (日給:${curWageStr}円)`,
-      "↓",
-      `ご相談) 【${clinicName}】${consultStart}~${consultEnd}(日給:${conWageStr}円${allowSuffix})`,
-      "",
-      "※上記募集は公開中のため、ご応募いただいた際に充足している可能性もございます。",
-      "恐れ入りますが、充足の際はご容赦くださいませ。",
-      "",
-      "お忙しいところ、ご負担をおかけして恐縮ではございますが、ご検討いただけましたら幸いです。",
-      "何卒よろしくお願い申し上げます。",
-      "",
-      `ドクターサポート事務局\u3000${staffLabel}`
-    ].join("\n");
-  }
-
-  const lines = [
-    docHonorific,
-    "平素よりお世話になっております。",
-    `ドクターサポート事務局の${staffLabel}でございます。`,
-    "",
-    `この度は、${tomorrowPrefix}${mdDay}のご勤務につきましてご相談がありご連絡させていただきました。`,
-    `現在、【${clinicName}】${absenceStart}~${absenceEnd}の時間帯に医師不在となる可能性があるため、`,
-    "大変恐縮ではございますがもし先生のご都合がよろしければ、ご勤務いただくことは可能でしょうか。",
-    "",
-    `・${ymdDay}`,
-    `ご相談) 【${clinicName}】${absenceStart}~${absenceEnd}`,
-    `日給:${conWageStr}円`
+function getReviewHeadersCommon_() {
+  return [
+    "確認済", "状態", "確認事項・候補", "日付", "拠点名(D6突合キー)",
+    "不在時間(D6突合キー)", "診療科", "アプローチ種別", "対象医師名", "現在シフト(拠点・時間)",
+    "相談シフト(拠点・時間)", "特別時給", "現在日給(円)", "相談日給(円)", "依頼手当(円)",
+    "担当者", "送信文案（社内システム貼付用）", "作業メモ（D6転記内容）", "投稿先スレッド", "投稿種別",
+    "Slack投稿本文", "根拠（参照シート・MTG発言）", "投稿ID・処理日時", "エラー内容"
   ];
-  if (isPublicRecruit !== false) {
-    lines.push("");
-    lines.push("※上記募集は公開中のため、ご応募いただいた際に充足している可能性もございます。");
-    lines.push("恐れ入りますが、充足の際はご容赦くださいませ。");
+}
+
+function ensureReviewStyleSheet_(ss, sheetName, headerColor) {
+  const reviewHeaders = getReviewHeadersCommon_();
+  const sh = ensureSheet_(ss, sheetName, reviewHeaders, headerColor || "#1a73e8");
+  sh.setColumnWidth(9, 140);
+  sh.setColumnWidth(17, 380);
+  sh.setColumnWidth(18, 240);
+  sh.setColumnWidth(21, 300);
+  sh.setColumnWidth(22, 180);
+  trimBlankRowsAndCols_(sh, reviewHeaders.length);
+  applyLeftMiddleToSheet_(sh);
+  return sh;
+}
+
+function setupD7Workspace() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  ensureReviewStyleSheet_(ss, SHEET_NAMES.D7_REVIEW, "#1a73e8");
+
+  const offlineSheetName = SHEET_NAMES.D7_OFFLINE_REVIEW || "オフライン修正シート";
+  ensureReviewStyleSheet_(ss, offlineSheetName, "#0b8043");
+
+  const confirmHeaders = [
+    "取込日時", "日付", "文字起こし上の拠点名", "補正後の拠点名候補", "診療科判定",
+    "時間帯", "アプローチ種別", "抽出医師名", "突合結果", "要確認の理由", "MTG発言抜粋"
+  ];
+  const confSheet = ensureSheet_(ss, SHEET_NAMES.D7_CONFIRM, confirmHeaders, "#e65100");
+  trimBlankRowsAndCols_(confSheet, confirmHeaders.length);
+  applyLeftMiddleToSheet_(confSheet);
+
+  const historyHeaders = [
+    "記録日時", "対象日付", "拠点名(D6突合キー)", "不在時間", "診療科",
+    "アプローチ種別", "打診医師名", "担当者", "証跡・Slack投稿ID"
+  ];
+  const histSheet = ensureSheet_(ss, SHEET_NAMES.D7_HISTORY, historyHeaders, "#00897b");
+  trimBlankRowsAndCols_(histSheet, historyHeaders.length);
+  applyLeftMiddleToSheet_(histSheet);
+
+  const dictHeaders = ["区分(拠点名 / その他)", "誤変換・揺れ表記（変換前）", "正規表記（変換後）", "メモ・備考"];
+  const dictSheet = ensureSheet_(ss, SHEET_NAMES.D7_DICT, dictHeaders, "#8e24aa");
+  populateInitialClinicDictSheet_(dictSheet);
+  trimBlankRowsAndCols_(dictSheet, dictHeaders.length);
+  applyLeftMiddleToSheet_(dictSheet);
+
+  const holidayHeaders = ["祝日日付(YYYY/MM/DD)", "祝日名称", "取得日時"];
+  const holSheet = ensureSheet_(ss, SHEET_NAMES.D7_HOLIDAY, holidayHeaders, "#0f9d58");
+  updateCabinetOfficeHolidays_(holSheet);
+  trimBlankRowsAndCols_(holSheet, holidayHeaders.length);
+  applyLeftMiddleToSheet_(holSheet);
+
+  const logHeaders = ["処理日時", "種別", "メールID / 投稿ID", "件名 / スレッド名", "処理件数", "詳細"];
+  const logSheet = ensureSheet_(ss, SHEET_NAMES.D7_LOG, logHeaders, "#5f6368");
+  trimBlankRowsAndCols_(logSheet, logHeaders.length);
+  applyLeftMiddleToSheet_(logSheet);
+
+  const def = ss.getSheetByName("シート1");
+  if (def && ss.getSheets().length > 1 && def.getLastRow() === 0) {
+    ss.deleteSheet(def);
   }
-  lines.push("");
-  lines.push("急なお願いとなり大変恐れ入りますが、ご無理のない範囲でご検討いただけますと幸いです。");
-  lines.push("お忙しいところ、ご負担をおかけして恐縮ではございますが、何卒よろしくお願い申し上げます。");
-  lines.push("");
-  lines.push(`ドクターサポート事務局\u3000${staffLabel}`);
-  return lines.join("\n");
+  console.log("「超募集くん（D7）」の初期セットアップが完了しました！");
+}
+
+function inferTimeFromCategory_(timeCategory, isKitaKasai) {
+  const tc = String(timeCategory || "").trim();
+  const nightEnd = isKitaKasai ? "20:00" : "21:00";
+  const amEnd = isKitaKasai ? "12:30" : "13:00";
+  const pmStart = isKitaKasai ? "14:00" : "15:00";
+  if (tc === "午前") return "09:00-" + amEnd;
+  if (tc === "午後") return pmStart + "-18:00";
+  if (tc === "夜間") return "18:00-" + nightEnd;
+  if (tc === "午後・夜間") return pmStart + "-" + nightEnd;
+  if (tc === "午前・午後") return "09:00-18:00";
+  if (tc === "終日") return "09:00-" + nightEnd;
+  return "";
+}
+
+function isPastCompletedReport_(evidenceText) {
+  const s = String(evidenceText || "").trim();
+  if (!s) return false;
+  if (s.includes("ドキュメント確定") || s.includes("編集くんカスタム確定")) return false;
+  const hasFutureIntent = /しましょう|ましょう|お願い|打診|聞いて|相談|調整し|いけるか|もらえるよう/.test(s);
+  if (hasFutureIntent) return false;
+  return /してもらいました|いただきました|埋まりました|充足しました|変更済み|移動済み|完了しました/.test(s);
+}
+
+function cleanVerboseEvidenceCell_(rawEvidence) {
+  const firstLine = String(rawEvidence || "").split(/\r?\n/)[0] || "";
+  let s = firstLine
+    .replace(/\[MTG発言\]\s*/g, "")
+    .replace(/\[ドキュメント確定[：:]([^\]]+)\]/g, "【$1】")
+    .replace(/\[編集くんカスタム確定\]/g, "【カスタム】")
+    .replace(/【複数枠おまとめ打診.*?$/g, "")
+    .replace(/【選択的打診.*?$/g, "")
+    .replace(/\[医籍[：:][^\]]+\]/g, "")
+    .trim();
+  return s || "-";
 }
